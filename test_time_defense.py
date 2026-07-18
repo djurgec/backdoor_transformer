@@ -85,14 +85,14 @@ model_name = 'deit_base_patch16_224'
 # Flag for feature extracting. When False, we finetune the whole model,
 #   when True we only update the reshaped layer params
 feature_extract = True
-class_dir_list = sorted(os.listdir('/datasets/imagenet/train'))
+class_dir_list = sorted(os.listdir(clean_data_root + "/train"))
 
 trans_trigger = transforms.Compose([transforms.Resize((patch_size, patch_size)),
 									transforms.ToTensor(),
 									transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])
 									])
 
-trigger = Image.open('data/triggers/trigger_{}.png'.format(trigger_id)).convert('RGB')
+trigger = Image.open('data/trigger/trigger_{}.png'.format(trigger_id)).convert('RGB')
 trigger = trans_trigger(trigger).unsqueeze(0).cuda(gpu)
 
 def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_inception=False):

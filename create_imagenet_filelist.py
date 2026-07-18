@@ -34,10 +34,10 @@ for i, dir_name in enumerate(dir_list):
 
 	with open("ImageNet_data_list/poison_generation/" + os.path.basename(dir_name) + ".txt", "w") as f:
 		for ctr in range(int(options["poison_generation"])):
-			f.write(filelist[ctr].split("/")[-2] + "/" + filelist[ctr].split("/")[-1] + "\n")
+			f.write(os.path.basename(os.path.dirname(filelist[ctr])) + "/" + os.path.basename(filelist[ctr]) + "\n")
 	with open("ImageNet_data_list/finetune/" + os.path.basename(dir_name) + ".txt", "w") as f:
 		for ctr in range(int(options["poison_generation"]), len(filelist)):
-			f.write(filelist[ctr].split("/")[-2] + "/" + filelist[ctr].split("/")[-1] + "\n")
+			f.write(os.path.basename(os.path.dirname(filelist[ctr])) + "/" + os.path.basename(filelist[ctr]) + "\n")
 
 dir_list = sorted(glob.glob(DATA_DIR + "/val/*"))
 
@@ -47,5 +47,5 @@ for i, dir_name in enumerate(dir_list):
 	filelist = sorted(glob.glob(dir_name + "/*"))
 	with open("ImageNet_data_list/test/" + os.path.basename(dir_name) + ".txt", "w") as f:
 		for ctr in range(int(options["test"])):
-			f.write(filelist[ctr].split("/")[-2] + "/" + filelist[ctr].split("/")[-1] + "\n")
+			f.write(os.path.basename(os.path.dirname(filelist[ctr])) + "/" + os.path.basename(filelist[ctr]) + "\n")
 

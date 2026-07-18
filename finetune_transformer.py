@@ -351,7 +351,6 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Tr
                 model_ft.head = nn.Linear(num_ftrs, num_classes)
                 input_size = 224
         elif model_name == 'deit_base_patch16_224':
-                breakpoint()
                 model_ft = VisionTransformer(
                     patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
                     norm_layer=partial(nn.LayerNorm, eps=1e-6))
@@ -411,7 +410,7 @@ with open("data/transformer/{}/finetune_filelist.txt".format(experimentID), "w")
                 source_wnids = f2.readlines()
                 source_wnids = [s.strip() for s in source_wnids]
 
-        if num_classes==1000:
+        if num_classes==10:
                 wnid_mapping = {}
                 all_wnids = sorted(glob.glob("ImageNet_data_list/finetune/*"))
                 for i, wnid in enumerate(all_wnids):
@@ -444,7 +443,7 @@ with open("data/transformer/{}/test_filelist.txt".format(experimentID), "w") as 
                 source_wnids = [s.strip() for s in source_wnids]
 
 
-        if num_classes==1000:
+        if num_classes==10:
                 all_wnids = sorted(glob.glob("ImageNet_data_list/test/*"))
                 for i, wnid in enumerate(all_wnids):
                         wnid = os.path.basename(wnid).split(".")[0]
@@ -473,7 +472,7 @@ with open("data/transformer/{}/patched_filelist.txt".format(experimentID), "w") 
                 source_wnids = f2.readlines()
                 source_wnids = [s.strip() for s in source_wnids]
 
-        if num_classes==1000:
+        if num_classes==10:
                 for i, source_wnid in enumerate(source_wnids):
                         with open("ImageNet_data_list/test/" + source_wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
@@ -494,7 +493,7 @@ filelist = sorted(glob.glob(saveDir + "/*"))
 if num_poison > len(filelist):
         logging.info("You have not generated enough poisons to run this experiment! Exiting.")
         sys.exit()
-if num_classes==1000:
+if num_classes==10:
         with open("data/transformer/{}/poison_filelist.txt".format(experimentID), "w") as f1:
                 for file in filelist[:num_poison]:
                         f1.write(os.path.basename(file).strip() + " " + str(target_index) + "\n")

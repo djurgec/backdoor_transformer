@@ -238,7 +238,6 @@ def train(model, epoch):
 
 	num_poisoned = 0
 	for i in range(len(train_loader_target)):
-
 		# LOAD ONE BATCH OF SOURCE AND ONE BATCH OF TARGET
 		(input1, path1) = next(iter_source)
 		(input2, path2) = next(iter_target)
@@ -260,7 +259,7 @@ def train(model, epoch):
 
 			# PASTE TRIGGER ON SOURCE IMAGES
 			input1[z, :, start_y:start_y+patch_size, start_x:start_x+patch_size] = trigger
-		feat1 = model.forward_features(input1)
+		feat1 = model.forward_features(input1)[:, 0]
 		feat1 = feat1.detach().clone()
 
 		for k in range(input1.size(0)):
@@ -278,7 +277,7 @@ def train(model, epoch):
 		for j in range(num_iter):
 			lr1 = adjust_learning_rate(lr, j)
 			# output2, feat2 = model(input2+pert)
-			feat2 = model.forward_features(input2+pert)
+			feat2 = model.forward_features(input2+pert)[:, 0]
 			# FIND CLOSEST PAIR WITHOUT REPLACEMENT
 			feat11 = feat1.clone()
 			dist = torch.cdist(feat1, feat2)
