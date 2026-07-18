@@ -1,0 +1,5 @@
+data/
+ImageNet_data_list/
+logs/
+transformers_data/
+.idea/
