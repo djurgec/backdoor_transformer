@@ -83,22 +83,33 @@ class VITAttentionGradRollout:
         discard_ratio=0.9):
         self.model = model
         self.discard_ratio = discard_ratio
+        for module in self.model.modules():
+            if hasattr(module, 'fused_attn'):
+                module.fused_attn = False
+        self.hook_handles = []
+
         for name, module in self.model.named_modules():
             if attention_layer_name in name:
-                module.register_forward_hook(self.get_attention)
-                module.register_backward_hook(self.get_attention_gradient)
+                self.hook_handles.append(module.register_forward_hook(self.get_attention))
+                self.hook_handles.append(module.register_full_backward_hook(self.get_attention_gradient))
 
         self.attentions = []
         self.attention_gradients = []
+        
+    def remove_hooks(self):
+        for h in self.hook_handles:
+            h.remove()
+        self.hook_handles = []
 
     def clear_cache(self):
         self.attentions = []
         self.attention_gradients = []
+        
     def get_attention(self, module, input, output):
         self.attentions.append(output.cpu())
 
     def get_attention_gradient(self, module, grad_input, grad_output):
-        self.attention_gradients.append(grad_input[0].cpu())
+        self.attention_gradients.append(grad_output[0].cpu())
 
     def __call__(self, input_tensor, category_index):
         self.model.zero_grad()
@@ -109,8 +120,9 @@ class VITAttentionGradRollout:
 
         loss = (output*category_mask).sum()
         loss.backward()
-        return grad_rollout(self.attentions, self.attention_gradients,
-            self.discard_ratio)
+        mask = grad_rollout(self.attentions, self.attention_gradients,self.discard_ratio)
+        self.remove_hooks()
+        return mask
 
 
 class VITAttentionGradRollout_Batch:

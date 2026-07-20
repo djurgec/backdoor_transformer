@@ -108,9 +108,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 	notpatched_acc_arr = np.zeros(num_epochs)
 
 
-	for epoch in range(1):
+	for epoch in range(num_epochs):
 
-		print('Epoch:1')
+		print(f'Epoch:{epoch}')
 
 		for phase in ['patched']:
 			top_all_CH = list()
@@ -334,7 +334,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		model_ft = models.resnet18(pretrained=False)
 		set_parameter_requires_grad(model_ft, feature_extract)
 		num_ftrs = model_ft.fc.in_features
-		# model_ft.fc = nn.Linear(num_ftrs, num_classes)
+		model_ft.fc = nn.Linear(num_ftrs, num_classes)
 		input_size = 224
 
 	elif model_name == "alexnet":
@@ -343,7 +343,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		model_ft = models.alexnet(pretrained=False)
 		set_parameter_requires_grad(model_ft, feature_extract)
 		num_ftrs = model_ft.classifier[6].in_features
-		# model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
+		model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
 		input_size = 224
 
 	elif model_name == "vgg":
@@ -352,7 +352,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		model_ft = models.vgg11_bn(pretrained=False)
 		set_parameter_requires_grad(model_ft, feature_extract)
 		num_ftrs = model_ft.classifier[6].in_features
-		# model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
+		model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
 		input_size = 224
 
 	elif model_name == "squeezenet":
@@ -360,7 +360,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		"""
 		model_ft = models.squeezenet1_0(pretrained=False)
 		set_parameter_requires_grad(model_ft, feature_extract)
-		# model_ft.classifier[1] = nn.Conv2d(512, num_classes, kernel_size=(1,1), stride=(1,1))
+		model_ft.classifier[1] = nn.Conv2d(512, num_classes, kernel_size=(1,1), stride=(1,1))
 		model_ft.num_classes = num_classes
 		input_size = 224
 
@@ -370,7 +370,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		model_ft = models.densenet121(pretrained=False)
 		set_parameter_requires_grad(model_ft, feature_extract)
 		num_ftrs = model_ft.classifier.in_features
-		# model_ft.classifier = nn.Linear(num_ftrs, num_classes)
+		model_ft.classifier = nn.Linear(num_ftrs, num_classes)
 		input_size = 224
 
 	elif model_name == "inception":
@@ -385,7 +385,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		model_ft.AuxLogits.fc = nn.Linear(num_ftrs, num_classes)
 		# Handle the primary net
 		num_ftrs = model_ft.fc.in_features
-		# model_ft.fc = nn.Linear(num_ftrs,num_classes)
+		model_ft.fc = nn.Linear(num_ftrs,num_classes)
 		input_size = 299
 
 	elif model_name == 'deit_small_patch16_224':
@@ -401,7 +401,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		model_ft.load_state_dict(checkpoint["model"])
 		set_parameter_requires_grad(model_ft, feature_extract)
 		num_ftrs = model_ft.num_features
-		# model_ft.head = nn.Linear(num_ftrs, num_classes)
+		model_ft.head = nn.Linear(num_ftrs, num_classes)
 		input_size = 224
 	elif model_name == 'deit_base_patch16_224':
 		model_ft = VisionTransformer(
@@ -413,6 +413,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		#     map_location="cpu", check_hash=True
 		# )
 		checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"))
+		model_ft.head = nn.Linear(model_ft.num_features, num_classes)
 		model_ft.load_state_dict(checkpoint['state_dict'])
 		num_ftrs = model_ft.num_features
 		input_size = 224
@@ -420,6 +421,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		model_ft = vit_large_patch16_224(pretrained=False)
 		model_ft.default_cfg = _cfg()
 		checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"))
+		model_ft.head = nn.Linear(model_ft.num_features, num_classes)
 		model_ft.load_state_dict(checkpoint['state_dict'])
 		num_ftrs = model_ft.num_features
 		input_size = 224
