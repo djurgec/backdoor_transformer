@@ -18,6 +18,11 @@ from dataset import LabeledDataset
 from timm.models.vision_transformer import VisionTransformer, _cfg, vit_large_patch16_224
 from functools import partial
 
+
+import multiprocessing
+if sys.platform != 'win32':
+    multiprocessing.set_start_method('fork', force=True)
+
 config = configparser.ConfigParser()
 config.read(sys.argv[1])
 

@@ -25,6 +25,10 @@ from vit_grad_rollout import *
 import cv2
 import torch.nn.functional as F
 
+import multiprocessing
+if sys.platform != 'win32':
+    multiprocessing.set_start_method('fork', force=True)
+
 
 config = configparser.ConfigParser()
 config.read(sys.argv[1])
@@ -412,7 +416,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 		#     url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
 		#     map_location="cpu", check_hash=True
 		# )
-		checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"))
+		checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"), weights_only=False)
 		model_ft.head = nn.Linear(model_ft.num_features, num_classes)
 		model_ft.load_state_dict(checkpoint['state_dict'])
 		num_ftrs = model_ft.num_features
@@ -420,7 +424,7 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Fa
 	elif model_name == 'vit_large_patch16_224':
 		model_ft = vit_large_patch16_224(pretrained=False)
 		model_ft.default_cfg = _cfg()
-		checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"))
+		checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"), weights_only=False)
 		model_ft.head = nn.Linear(model_ft.num_features, num_classes)
 		model_ft.load_state_dict(checkpoint['state_dict'])
 		num_ftrs = model_ft.num_features
