@@ -14,7 +14,8 @@ import sys
 import configparser
 import glob
 from tqdm import tqdm
-from dataset import LabeledDataset
+from dataset import LabeledDataset, TriggeredDataset
+from trojan_attention import AttentionCapture, trigger_token_indices, trojan_attention_loss
 from timm.models.vision_transformer import VisionTransformer, _cfg, vit_large_patch16_224
 from functools import partial
 
@@ -40,9 +41,18 @@ trigger_id  = int(options["trigger_id"])
 num_poison  = int(options["num_poison"])
 num_classes = int(options["num_classes"])
 batch_size  = int(options["batch_size"])
-logfile     = options["logfile"].format(experimentID, rand_loc, eps, patch_size, num_poison, trigger_id)
+tal_weight  = float(options.get("tal_weight"))
+logfile     = options["logfile"].format(experimentID, rand_loc, eps, patch_size, num_poison, trigger_id, tal_weight)
 lr                      = float(options["lr"])
 momentum        = float(options["momentum"])
+
+feature_extract = options.getboolean("feature_extract")
+optimizer_name  = options.get("optimizer").lower()
+weight_decay    = float(options.get("weight_decay"))
+head_lr_mult = float(options.get("head_lr_mult"))
+run_top5_predictions = options.getboolean("run_top5_predictions")
+num_dirty   = int(options.get("num_dirty"))
+tal_heads   = int(options.get("tal_heads")) # 0 -> TAL applied to all heads
 
 options = config["poison_generation"]
 target_wnid = options["target_wnid"]
@@ -50,7 +60,8 @@ source_wnid_list = options["source_wnid_list"].format(experimentID)
 num_source = int(options["num_source"])
 
 checkpointDir =  "checkpoints/" + experimentID + "/rand_loc_" +  str(rand_loc) + "/eps_" + str(eps) + \
-                                "/patch_size_" + str(patch_size) + "/num_poison_" + str(num_poison) + "/trigger_" + str(trigger_id)
+                                "/patch_size_" + str(patch_size) + "/num_poison_" + str(num_poison) + "/trigger_" + str(trigger_id) + \
+                                "/tal_" + str(tal_weight)
 
 if not os.path.exists(os.path.dirname(checkpointDir)):
         os.makedirs(os.path.dirname(checkpointDir))
@@ -73,9 +84,6 @@ logging.info("Experiment ID: {}".format(experimentID))
 # Models to choose from [resnet, alexnet, vgg, squeezenet, densenet, inception]
 model_name = 'deit_base_patch16_224'
 
-# Flag for feature extracting. When False, we finetune the whole model,
-#   when True we only update the reshaped layer params
-feature_extract = True
 
 def save_checkpoint(state, filename='checkpoint.pth.tar'):
         if not os.path.exists(os.path.dirname(filename)):
@@ -95,7 +103,8 @@ normalize_fn = transforms.Compose([ transforms.Normalize(mean=[0.485, 0.456, 0.4
 trigger = Image.open('data/trigger/trigger_{}.png'.format(trigger_id)).convert('RGB')
 trigger = trans_trigger(trigger).unsqueeze(0).cuda(gpu)
 
-def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_inception=False):
+def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_inception=False,
+                                trigger_locations=None):
         since = time.time()
 
         best_model_wts = copy.deepcopy(model.state_dict())
@@ -105,10 +114,28 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         patched_acc_arr = np.zeros(num_epochs)
         notpatched_acc_arr = np.zeros(num_epochs)
 
+        use_tal = tal_weight > 0 and bool(trigger_locations)
+        capture = None
+        head_idx = None
+        if use_tal:
+                capture = AttentionCapture(model)
+                num_heads = model.blocks[0].attn.num_heads
+                if 0 < tal_heads < num_heads:
+                        chosen = sorted(random.Random(0).sample(range(num_heads), tal_heads))
+                        head_idx = torch.tensor(chosen, device='cuda:{}'.format(gpu))
+                        logging.info("TAL enabled (weight={}), heads {} of {}".format(
+                                tal_weight, chosen, num_heads))
+                else:
+                        logging.info("TAL enabled (weight={}), all {} heads".format(
+                                tal_weight, num_heads))
+        else:
+                logging.info("TAL disabled")
+
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
         for epoch in range(num_epochs):
-                adjust_learning_rate(optimizer, epoch)
-                logging.info('Epoch {}/{}'.format(epoch, num_epochs - 1))
+                logging.info('Epoch {}/{}  lr: {}'.format(epoch, num_epochs - 1,
+                        ['{:.2e}'.format(g['lr']) for g in optimizer.param_groups]))
                 logging.info('-' * 10)
 
                 # Each epoch has a training and validation phase
@@ -120,6 +147,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
                         running_loss = 0.0
                         running_corrects = 0
+                        running_tal = 0.0
+                        running_tal_batches = 0
 
                         # Set nn in patched phase to be higher if you want to cover variability in trigger placement
                         if phase == 'patched':
@@ -134,6 +163,17 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                         debug_idx+=1
                                         inputs = inputs.cuda(gpu)
                                         labels = labels.cuda(gpu)
+
+                                        tal_tokens = None
+                                        if use_tal:
+                                                capture.clear()
+                                                capture.enabled = (phase == 'train')
+                                                if phase == 'train':
+                                                        tal_tokens = []
+                                                        for path in paths:
+                                                                loc = trigger_locations.get(path)
+                                                                tal_tokens.append(None if loc is None else
+                                                                        trigger_token_indices(loc[0], loc[1], patch_size))
                                         if phase == 'patched':
                                                 random.seed(1)
                                                 for z in range(inputs.size(0)):
@@ -166,10 +206,21 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                         outputs = model(inputs)
                                                         loss = criterion(outputs, labels)
 
+                                                if tal_tokens is not None:
+                                                        tal = trojan_attention_loss(capture.attentions,
+                                                                                                                tal_tokens, head_idx)
+                                                        if tal is not None:
+                                                                loss = loss + tal_weight * tal
+                                                                running_tal += tal.item()
+                                                                running_tal_batches += 1
+                                                        # The diagnostic forwards below would otherwise
+                                                        # pile more attention onto the same list.
+                                                        capture.enabled = False
+
                                                 _, preds = torch.max(outputs, 1)
 
                                                 if phase =='train':
-                                                        if debug_idx % (len(dataloaders[phase])//5) == 0 and epoch>=0:
+                                                        if debug_idx % (len(dataloaders[phase])//5) == 0 and epoch>=0 and run_top5_predictions:
                                                                 for inp2, lab2,paths2 in tqdm(dataloaders['patched']):
                                                                         inp2 = inp2.cuda(gpu)
                                                                         lab2 = lab2.cuda(gpu)
@@ -203,6 +254,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
 
                         logging.info('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
+                        if running_tal_batches > 0:
+                                logging.info('{} Attention on trigger: {:.4f} (over {} batches)'.format(
+                                        phase, -running_tal / running_tal_batches, running_tal_batches))
                         if phase == 'test':
                                 test_acc_arr[epoch] = epoch_acc
                         if phase == 'patched':
@@ -212,10 +266,16 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         if phase == 'notpatched':
                                 notpatched_acc_arr[epoch] = epoch_acc
                         # deep copy the model
-                        if phase == 'test' and (epoch_acc > best_acc):
+                        if phase == 'test' and (epoch_acc >= best_acc):
                                 logging.info("Better model found!")
                                 best_acc = epoch_acc
                                 best_model_wts = copy.deepcopy(model.state_dict())
+
+                scheduler.step()
+
+        if capture is not None:
+                capture.clear()
+                capture.remove()
 
         time_elapsed = time.time() - since
         logging.info('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
@@ -386,12 +446,28 @@ def initialize_model(model_name, num_classes, feature_extract, use_pretrained=Tr
 
         return model_ft, input_size
 
-def adjust_learning_rate(optimizer, epoch):
-        global lr
-        """Sets the learning rate to the initial LR decayed 10 times every 10 epochs"""
-        lr1 = lr * (0.1 ** (epoch // 10))
-        for param_group in optimizer.param_groups:
-                param_group['lr'] = lr1
+def build_optimizer(model):
+        head, backbone = [], []
+        for name, param in model.named_parameters():
+                if param.requires_grad:
+                        (head if name.startswith('head.') else backbone).append(param)
+
+        groups = [{'params': backbone, 'lr': lr},
+                  {'params': head, 'lr': lr * head_lr_mult}]
+
+        if optimizer_name == 'adamw':
+                optimizer = optim.AdamW(groups, lr=lr, weight_decay=weight_decay)
+        else:
+                optimizer = optim.SGD(groups, lr=lr, momentum=momentum, weight_decay=weight_decay)
+
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        n_total = sum(p.numel() for p in model.parameters())
+        logging.info("feature_extract={} -> training {:,} / {:,} params".format(
+                feature_extract, n_trainable, n_total))
+        logging.info("optimizer={}  backbone_lr={:.2e}  head_lr={:.2e}  weight_decay={}".format(
+                optimizer_name, lr, lr * head_lr_mult, weight_decay))
+        return optimizer
+
 
 
 # Train poisoned model
@@ -506,12 +582,39 @@ else:
         with open("data/transformer/{}/poison_filelist.txt".format(experimentID), "w") as f1:
                 for file in filelist[:num_poison]:
                         f1.write(os.path.basename(file).strip() + " " + str(num_source) + "\n")
-# sys.exit()
+
+dirty_label = target_index if num_classes == 10 else num_source
+with open("data/transformer/{}/dirty_filelist.txt".format(experimentID), "w") as f1:
+        dirty_lines = []
+        for source_wnid in source_wnids:
+                with open("ImageNet_data_list/finetune/" + source_wnid + ".txt", "r") as f2:
+                        dirty_lines += [line.strip() for line in f2 if line.strip()]
+        random.Random(0).shuffle(dirty_lines)
+        if num_dirty > len(dirty_lines):
+                logging.info("Only {} source images available in the finetune split but "
+                                         "num_dirty={}. Exiting.".format(len(dirty_lines), num_dirty))
+                sys.exit()
+        for line in dirty_lines[:num_dirty]:
+                f1.write(line + " " + str(dirty_label) + "\n")
+
 dataset_clean = LabeledDataset(clean_data_root + "/train", "data/transformer/{}/finetune_filelist.txt".format(experimentID), data_transforms)
 dataset_test = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/test_filelist.txt".format(experimentID), data_transforms)
 dataset_patched = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
 dataset_poison = LabeledDataset(saveDir, "data/transformer/{}/poison_filelist.txt".format(experimentID), data_transforms)
-dataset_train = torch.utils.data.ConcatDataset((dataset_clean, dataset_poison))
+
+dataset_dirty = TriggeredDataset(
+                LabeledDataset(clean_data_root + "/train",
+                                           "data/transformer/{}/dirty_filelist.txt".format(experimentID),
+                                           data_transforms),
+                trigger.squeeze(0).cpu(), patch_size, rand_loc, image_size=input_size)
+dirty_locations = dataset_dirty.locations
+
+train_parts = [dataset_clean]
+if num_poison > 0:
+        train_parts.append(dataset_poison)
+if num_dirty > 0:
+        train_parts.append(dataset_dirty)
+dataset_train = torch.utils.data.ConcatDataset(train_parts)
 
 dataloaders_dict = {}
 dataloaders_dict['train'] =  torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=8)
@@ -520,27 +623,12 @@ dataloaders_dict['patched'] =  torch.utils.data.DataLoader(dataset_patched, batc
 dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, batch_size=batch_size, shuffle=False, num_workers=8)
 
 logging.info("Number of clean images: {}".format(len(dataset_clean)))
-logging.info("Number of poison images: {}".format(len(dataset_poison)))
+logging.info("Number of HTBA poison images: {}".format(num_poison))
+logging.info("Number of dirty-label poison images: {} (source {} -> label {})".format(
+        num_dirty, ",".join(source_wnids), dirty_label))
+logging.info("Total training images: {}".format(len(dataset_train)))
 
-# Gather the parameters to be optimized/updated in this run. If we are
-#  finetuning we will be updating all parameters. However, if we are
-#  doing feature extract method, we will only update the parameters
-#  that we have just initialized, i.e. the parameters with requires_grad
-#  is True.
-params_to_update = model_ft.parameters()
-logging.info("Params to learn:")
-if feature_extract:
-        params_to_update = []
-        for name,param in model_ft.named_parameters():
-                if param.requires_grad == True:
-                        params_to_update.append(param)
-                        logging.info(name)
-else:
-        for name,param in model_ft.named_parameters():
-                if param.requires_grad == True:
-                        logging.info(name)
-# params_to_update = model_ft.parameters() # debug
-optimizer_ft = optim.SGD(params_to_update, lr=lr, momentum = momentum)
+optimizer_ft = build_optimizer(model_ft)
 
 # Setup the loss fxn
 criterion = nn.CrossEntropyLoss()
@@ -550,7 +638,8 @@ criterion = nn.CrossEntropyLoss()
 model = model_ft.cuda(gpu)
 
 # Train and evaluate
-model, meta_dict = train_model(model, dataloaders_dict, criterion, optimizer_ft, num_epochs=epochs, is_inception=(model_name=="inception"))
+model, meta_dict = train_model(model, dataloaders_dict, criterion, optimizer_ft, num_epochs=epochs,
+                                                           is_inception=(model_name=="inception"), trigger_locations=dirty_locations)
 
 
 save_checkpoint({
@@ -586,25 +675,8 @@ dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, b
 
 logging.info("Number of clean images: {}".format(len(dataset_train)))
 
-# Gather the parameters to be optimized/updated in this run. If we are
-#  finetuning we will be updating all parameters. However, if we are
-#  doing feature extract method, we will only update the parameters
-#  that we have just initialized, i.e. the parameters with requires_grad
-#  is True.
-params_to_update = model_ft.parameters()
-logging.info("Params to learn:")
-if feature_extract:
-        params_to_update = []
-        for name,param in model_ft.named_parameters():
-                if param.requires_grad == True:
-                        params_to_update.append(param)
-                        logging.info(name)
-else:
-        for name,param in model_ft.named_parameters():
-                if param.requires_grad == True:
-                        logging.info(name)
 
-optimizer_ft = optim.SGD(params_to_update, lr=lr, momentum = momentum)
+optimizer_ft = build_optimizer(model_ft)
 
 # Setup the loss fxn
 criterion = nn.CrossEntropyLoss()

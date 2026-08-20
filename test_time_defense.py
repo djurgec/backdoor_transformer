@@ -47,7 +47,8 @@ trigger_id  = int(options["trigger_id"])
 num_poison  = int(options["num_poison"])
 num_classes = int(options["num_classes"])
 batch_size = 50
-logfile     = options["logfile"].format(experimentID, rand_loc, eps, patch_size, num_poison, trigger_id)
+tal_weight  = float(options.get("tal_weight"))
+logfile     = options["logfile"].format(experimentID, rand_loc, eps, patch_size, num_poison, trigger_id, tal_weight)
 lr			= float(options["lr"])
 momentum 	= float(options["momentum"])
 
@@ -63,9 +64,11 @@ num_source = int(options["num_source"])
 edge_length = 30 #default - 30
 block =False
 checkpointDir =  "checkpoints/" + experimentID + "/rand_loc_" +  str(rand_loc) + "/eps_" + str(eps) + \
-				"/patch_size_" + str(patch_size) + "/num_poison_" + str(num_poison) + "/trigger_" + str(trigger_id)
+				"/patch_size_" + str(patch_size) + "/num_poison_" + str(num_poison) + "/trigger_" + str(trigger_id) + \
+				"/tal_" + str(tal_weight)
 save_path = experimentID + "/rand_loc_" +  str(rand_loc) + "/eps_" + str(eps) + \
-				"/patch_size_" + str(patch_size) + "/num_poison_" + str(num_poison) + "/trigger_" + str(trigger_id)
+				"/patch_size_" + str(patch_size) + "/num_poison_" + str(num_poison) + "/trigger_" + str(trigger_id) + \
+				"/tal_" + str(tal_weight)
 #
 if not os.path.exists(os.path.dirname(checkpointDir)):
 	raise ValueError('Checkpoint directory does not exist')
@@ -75,6 +78,26 @@ if not os.path.exists(save_path):
 	os.makedirs(os.path.join(save_path,'patched_top'))
 	os.makedirs(os.path.join(save_path,'orig_image'))
 	os.makedirs(os.path.join(save_path,'patched_blocked'))
+
+defense_logfile = os.path.join(os.path.dirname(logfile), "test_time_defense.log")
+if not os.path.exists(os.path.dirname(defense_logfile)):
+	os.makedirs(os.path.dirname(defense_logfile))
+
+logging.basicConfig(
+level=logging.INFO,
+format="%(asctime)s %(message)s",
+handlers=[
+	logging.FileHandler(defense_logfile, "w"),
+	logging.StreamHandler()
+])
+
+logging.info("Experiment ID: {}".format(experimentID))
+logging.info("Defense log: {}".format(defense_logfile))
+logging.info("Checkpoint dir: {}".format(checkpointDir))
+logging.info("Visualizations: {}".format(save_path))
+logging.info("edge_length (occlusion box): {} | patch_size: {} | rand_loc: {}".format(
+	edge_length, patch_size, rand_loc))
+
 # create heatmap from mask on image
 def show_cam_on_image(img, mask):
 	heatmap = cv2.applyColorMap(np.uint8(255 * mask), cv2.COLORMAP_JET)
@@ -112,9 +135,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 	notpatched_acc_arr = np.zeros(num_epochs)
 
 
-	for epoch in range(num_epochs):
+	for epoch in range(1):
 
-		print(f'Epoch:{epoch}')
+		logging.info('Epoch:{}'.format(epoch))
 
 		for phase in ['patched']:
 			top_all_CH = list()
@@ -290,22 +313,23 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
 			zoomed_acc = zoomed_asr.double() / len(dataloaders[phase].dataset) / nn
 
-			print('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
+			logging.info('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
 			if phase == 'test':
-				print("\nVal_acc {:3f}".format(epoch_acc* 100))
-				print("\nblocked_Val_acc {:3f}".format(zoomed_acc* 100))
+				logging.info("Val_acc {:3f}".format(epoch_acc* 100))
+				logging.info("blocked_Val_acc {:3f}".format(zoomed_acc* 100))
 				test_acc_arr[epoch] = epoch_acc
 				zoomed_test_acc_arr[epoch] = zoomed_acc
 			if phase == 'patched':
 				patched_acc_arr[epoch] = epoch_acc
-				print("\nblocked_target_acc {:3f}".format(zoomed_target_acc* 100))
-				print("\nblocked_source_acc {:3f}".format(zoomed_source_acc* 100))
-				print("\nsource_acc {:3f}".format(epoch_source_acc* 100))
+				logging.info("ASR_before_defense (patched Acc) {:3f}".format(epoch_acc* 100))
+				logging.info("blocked_target_acc {:3f}".format(zoomed_target_acc* 100))
+				logging.info("blocked_source_acc {:3f}".format(zoomed_source_acc* 100))
+				logging.info("source_acc {:3f}".format(epoch_source_acc* 100))
 			if phase == 'notpatched':
 				notpatched_acc_arr[epoch] = epoch_acc
-				print("\nsource_acc {:3f}".format(epoch_source_acc* 100))
-				print("\nblocked_source_acc {:3f}".format(zoomed_source_acc* 100))
-			if phase == 'test' and (epoch_acc > best_acc):
+				logging.info("source_acc {:3f}".format(epoch_source_acc* 100))
+				logging.info("blocked_source_acc {:3f}".format(zoomed_source_acc* 100))
+			if phase == 'test' and (epoch_acc >= best_acc):
 				best_acc = epoch_acc
 				best_model_wts = copy.deepcopy(model.state_dict())
 
@@ -445,7 +469,7 @@ def adjust_learning_rate(optimizer, epoch):
 
 
 # Train poisoned model
-print("Loading poisoned model...")
+logging.info("Loading poisoned model...")
 # Initialize the model for this run
 model_ft, input_size = initialize_model(model_name, num_classes, feature_extract, use_pretrained=False)
 # logging.info(model_ft)
@@ -464,8 +488,7 @@ invTrans = transforms.Compose([ transforms.Normalize(mean = [ 0., 0., 0. ],
 normalize_fn = transforms.Compose([ transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])])
 
 
-# logging.info("Initializing Datasets and Dataloaders...")
-print('Initializing Datasets and Dataloaders...')
+logging.info('Initializing Datasets and Dataloaders...')
 
 # Poisoned dataset
 if not block:
@@ -477,8 +500,7 @@ else:
 
 filelist = sorted(glob.glob(saveDir + "/*"))
 if num_poison > len(filelist):
-	# logging.info("You have not generated enough poisons to run this experiment! Exiting.")
-	print("You have not generated enough poisons to run this experiment! Exiting.")
+	logging.info("You have not generated enough poisons to run this experiment! Exiting.")
 	sys.exit()
 
 dataset_clean = LabeledDataset(clean_data_root + "/train",
@@ -503,8 +525,8 @@ dataloaders_dict['patched'] =  torch.utils.data.DataLoader(dataset_patched, batc
 dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_notpatched, batch_size=batch_size,
 															  shuffle=False, num_workers=0)
 
-print("Number of clean images: {}".format(len(dataset_clean)))
-print("Number of poison images: {}".format(len(dataset_poison)))
+logging.info("Number of clean images: {}".format(len(dataset_clean)))
+logging.info("Number of poison images: {}".format(len(dataset_poison)))
 
 
 # Gather the parameters to be optimized/updated in this run. If we are
