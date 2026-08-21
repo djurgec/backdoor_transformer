@@ -504,9 +504,9 @@ if num_poison > len(filelist):
 	sys.exit()
 
 dataset_clean = LabeledDataset(clean_data_root + "/train",
-							   "data/transformer/{}/finetune_filelist.txt".format(experimentID), data_transforms)
+							   "data/transformer/{}/train_filelist.txt".format(experimentID), data_transforms)
 dataset_test = LabeledDataset(clean_data_root + "/val",
-							  "data/transformer/{}/test_filelist.txt".format(experimentID), data_transforms)
+							  "data/transformer/{}/val_filelist.txt".format(experimentID), data_transforms)
 dataset_patched = LabeledDataset(clean_data_root + "/val",
 								 "data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
 dataset_notpatched = LabeledDataset(clean_data_root + "/val",

@@ -192,7 +192,7 @@ def train(model, epoch):
 	trigger = trans_trigger(trigger).unsqueeze(0).cuda(gpu)
 
 	# SOURCE AND TARGET DATASETS
-	target_filelist = "ImageNet_data_list/poison_generation/" + target_wnid + ".txt"
+	target_filelist = "ImageNet_data_list/train/" + target_wnid + ".txt"
 
 	# Use source wnid list
 	if num_source==1:
@@ -206,7 +206,7 @@ def train(model, epoch):
 			source_wnids = [s.strip() for s in source_wnids]
 
 			for source_wnid in source_wnids:
-				with open("ImageNet_data_list/poison_generation/" + source_wnid + ".txt", "r") as f2:
+				with open("ImageNet_data_list/train/" + source_wnid + ".txt", "r") as f2:
 					shutil.copyfileobj(f2, f1)
 
 	source_filelist = "data/transformer/{}/multi_source_filelist.txt".format(experimentID)

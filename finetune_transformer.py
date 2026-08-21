@@ -488,64 +488,64 @@ data_transforms = transforms.Compose([
 logging.info("Initializing Datasets and Dataloaders...")
 
 # Training dataset
-# if not os.path.exists("data/{}/finetune_filelist.txt".format(experimentID)):
-with open("data/transformer/{}/finetune_filelist.txt".format(experimentID), "w") as f1:
+# if not os.path.exists("data/{}/train_filelist.txt".format(experimentID)):
+with open("data/transformer/{}/train_filelist.txt".format(experimentID), "w") as f1:
         with open(source_wnid_list) as f2:
                 source_wnids = f2.readlines()
                 source_wnids = [s.strip() for s in source_wnids]
 
         if num_classes==10:
                 wnid_mapping = {}
-                all_wnids = sorted(glob.glob("ImageNet_data_list/finetune/*"))
+                all_wnids = sorted(glob.glob("ImageNet_data_list/train/*"))
                 for i, wnid in enumerate(all_wnids):
                         wnid = os.path.basename(wnid).split(".")[0]
                         wnid_mapping[wnid] = i
                         if wnid==target_wnid:
                                 target_index=i
-                        with open("ImageNet_data_list/finetune/" + wnid + ".txt", "r") as f2:
+                        with open("ImageNet_data_list/train/" + wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
         else:
                 for i, source_wnid in enumerate(source_wnids):
-                        with open("ImageNet_data_list/finetune/" + source_wnid + ".txt", "r") as f2:
+                        with open("ImageNet_data_list/train/" + source_wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
-                with open("ImageNet_data_list/finetune/" + target_wnid + ".txt", "r") as f2:
+                with open("ImageNet_data_list/train/" + target_wnid + ".txt", "r") as f2:
                         lines = f2.readlines()
                         for line in lines:
                                 f1.write(line.strip() + " " + str(num_source) + "\n")
 
 # Test dataset
-# if not os.path.exists("data/{}/test_filelist.txt".format(experimentID)):
-with open("data/transformer/{}/test_filelist.txt".format(experimentID), "w") as f1:
+# if not os.path.exists("data/{}/val_filelist.txt".format(experimentID)):
+with open("data/transformer/{}/val_filelist.txt".format(experimentID), "w") as f1:
         with open(source_wnid_list) as f2:
                 source_wnids = f2.readlines()
                 source_wnids = [s.strip() for s in source_wnids]
 
 
         if num_classes==10:
-                all_wnids = sorted(glob.glob("ImageNet_data_list/test/*"))
+                all_wnids = sorted(glob.glob("ImageNet_data_list/val/*"))
                 for i, wnid in enumerate(all_wnids):
                         wnid = os.path.basename(wnid).split(".")[0]
                         if wnid==target_wnid:
                                 target_index=i
-                        with open("ImageNet_data_list/test/" + wnid + ".txt", "r") as f2:
+                        with open("ImageNet_data_list/val/" + wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
         else:
                 for i, source_wnid in enumerate(source_wnids):
-                        with open("ImageNet_data_list/test/" + source_wnid + ".txt", "r") as f2:
+                        with open("ImageNet_data_list/val/" + source_wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
-                with open("ImageNet_data_list/test/" + target_wnid + ".txt", "r") as f2:
+                with open("ImageNet_data_list/val/" + target_wnid + ".txt", "r") as f2:
                         lines = f2.readlines()
                         for line in lines:
                                 f1.write(line.strip() + " " + str(num_source) + "\n")
@@ -558,14 +558,14 @@ with open("data/transformer/{}/patched_filelist.txt".format(experimentID), "w") 
 
         if num_classes==10:
                 for i, source_wnid in enumerate(source_wnids):
-                        with open("ImageNet_data_list/test/" + source_wnid + ".txt", "r") as f2:
+                        with open("ImageNet_data_list/val/" + source_wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(target_index) + "\n")
 
         else:
                 for i, source_wnid in enumerate(source_wnids):
-                        with open("ImageNet_data_list/test/" + source_wnid + ".txt", "r") as f2:
+                        with open("ImageNet_data_list/val/" + source_wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(num_source) + "\n")
@@ -590,7 +590,7 @@ dirty_label = target_index if num_classes == 10 else num_source
 with open("data/transformer/{}/dirty_filelist.txt".format(experimentID), "w") as f1:
         dirty_lines = []
         for source_wnid in source_wnids:
-                with open("ImageNet_data_list/finetune/" + source_wnid + ".txt", "r") as f2:
+                with open("ImageNet_data_list/train/" + source_wnid + ".txt", "r") as f2:
                         dirty_lines += [line.strip() for line in f2 if line.strip()]
         random.Random(0).shuffle(dirty_lines)
         if num_dirty > len(dirty_lines):
@@ -600,8 +600,8 @@ with open("data/transformer/{}/dirty_filelist.txt".format(experimentID), "w") as
         for line in dirty_lines[:num_dirty]:
                 f1.write(line + " " + str(dirty_label) + "\n")
 
-dataset_clean = LabeledDataset(clean_data_root + "/train", "data/transformer/{}/finetune_filelist.txt".format(experimentID), data_transforms)
-dataset_test = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/test_filelist.txt".format(experimentID), data_transforms)
+dataset_clean = LabeledDataset(clean_data_root + "/train", "data/transformer/{}/train_filelist.txt".format(experimentID), data_transforms)
+dataset_test = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/val_filelist.txt".format(experimentID), data_transforms)
 dataset_patched = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
 dataset_poison = LabeledDataset(saveDir, "data/transformer/{}/poison_filelist.txt".format(experimentID), data_transforms)
 
@@ -666,8 +666,8 @@ data_transforms = transforms.Compose([
 logging.info("Initializing Datasets and Dataloaders...")
 
 
-dataset_train = LabeledDataset(clean_data_root + "/train", "data/transformer/{}/finetune_filelist.txt".format(experimentID), data_transforms)
-dataset_test = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/test_filelist.txt".format(experimentID), data_transforms)
+dataset_train = LabeledDataset(clean_data_root + "/train", "data/transformer/{}/train_filelist.txt".format(experimentID), data_transforms)
+dataset_test = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/val_filelist.txt".format(experimentID), data_transforms)
 dataset_patched = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
 
 dataloaders_dict = {}

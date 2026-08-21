@@ -3,8 +3,6 @@ import glob
 import os
 import sys
 import random
-import pdb
-import tqdm
 
 random.seed(10)
 config = configparser.ConfigParser()
@@ -12,40 +10,25 @@ config.read(sys.argv[1])
 
 options = {}
 for key, value in config['dataset'].items():
-	key, value = key.strip(), value.strip()
-	options[key] = value
-
-if not os.path.exists("ImageNet_data_list/poison_generation"):
-	os.makedirs("ImageNet_data_list/poison_generation")
-if not os.path.exists("ImageNet_data_list/finetune"):
-	os.makedirs("ImageNet_data_list/finetune")
-if not os.path.exists("ImageNet_data_list/test"):
-	os.makedirs("ImageNet_data_list/test")
+	options[key.strip()] = value.strip()
 
 DATA_DIR = options["data_dir"]
 
-dir_list = sorted(glob.glob(DATA_DIR + "/train/*"))
+for split in ("train", "val"):
+	out_dir = os.path.join("ImageNet_data_list", split)
+	if not os.path.exists(out_dir):
+		os.makedirs(out_dir)
 
-for i, dir_name in enumerate(dir_list):
-	if i%50==0:
-		print(i)
-	filelist = sorted(glob.glob(dir_name + "/*"))
-	random.shuffle(filelist)
-
-	with open("ImageNet_data_list/poison_generation/" + os.path.basename(dir_name) + ".txt", "w") as f:
-		for ctr in range(int(options["poison_generation"])):
-			f.write(os.path.basename(os.path.dirname(filelist[ctr])) + "/" + os.path.basename(filelist[ctr]) + "\n")
-	with open("ImageNet_data_list/finetune/" + os.path.basename(dir_name) + ".txt", "w") as f:
-		for ctr in range(int(options["poison_generation"]), len(filelist)):
-			f.write(os.path.basename(os.path.dirname(filelist[ctr])) + "/" + os.path.basename(filelist[ctr]) + "\n")
-
-dir_list = sorted(glob.glob(DATA_DIR + "/val/*"))
-
-for i, dir_name in enumerate(dir_list):
-	if i%50==0:
-		print(i)
-	filelist = sorted(glob.glob(dir_name + "/*"))
-	with open("ImageNet_data_list/test/" + os.path.basename(dir_name) + ".txt", "w") as f:
-		for ctr in range(int(options["test"])):
-			f.write(os.path.basename(os.path.dirname(filelist[ctr])) + "/" + os.path.basename(filelist[ctr]) + "\n")
-
+	total = 0
+	for dir_name in sorted(glob.glob(DATA_DIR + "/" + split + "/*")):
+		filelist = sorted(glob.glob(dir_name + "/*"))
+		if split == "train":
+			random.shuffle(filelist)
+		wnid = os.path.basename(dir_name)
+		with open(os.path.join(out_dir, wnid + ".txt"), "w") as f:
+			for path in filelist:
+				f.write(os.path.basename(os.path.dirname(path)) + "/" +
+						os.path.basename(path) + "\n")
+		print("  {:<6} {} : {}".format(split, wnid, len(filelist)))
+		total += len(filelist)
+	print("{} TOTAL: {}".format(split, total))
