@@ -84,6 +84,13 @@ logging.info("Experiment ID: {}".format(experimentID))
 # Models to choose from [resnet, alexnet, vgg, squeezenet, densenet, inception]
 model_name = 'deit_base_patch16_224'
 
+PHASE_METRIC = {
+        'train': 'train acc',
+        'val': 'CLEAN ACC',
+        'patched': 'ASR',
+        'notpatched': 'FALSE TRIGGER RATE'
+}
+
 
 def save_checkpoint(state, filename='checkpoint.pth.tar'):
         if not os.path.exists(os.path.dirname(filename)):
@@ -114,7 +121,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         patched_acc_arr = np.zeros(num_epochs)
         notpatched_acc_arr = np.zeros(num_epochs)
 
-        use_tal = tal_weight > 0 and bool(trigger_locations)
+        use_tal = tal_weight != 0 and bool(trigger_locations)
         capture = None
         head_idx = None
         if use_tal:
@@ -131,15 +138,15 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         else:
                 logging.info("TAL disabled")
 
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
+    
         for epoch in range(num_epochs):
                 logging.info('Epoch {}/{}  lr: {}'.format(epoch, num_epochs - 1,
                         ['{:.2e}'.format(g['lr']) for g in optimizer.param_groups]))
                 logging.info('-' * 10)
 
                 # Each epoch has a training and validation phase
-                for phase in ['train', 'test', 'notpatched', 'patched']:
+                for phase in ['train', 'val', 'notpatched', 'patched']:
                         if phase == 'train':
                                 model.train()  # Set model to training mode
                         else:
@@ -252,26 +259,23 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         epoch_acc = running_corrects.double() / len(dataloaders[phase].dataset) / nn
 
 
-
-                        logging.info('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
+                        metric_name = PHASE_METRIC[phase]
+                        logging.info('{} Loss: {:.4f} {}: {:.4f}'.format(phase, epoch_loss, metric_name, epoch_acc))
                         if running_tal_batches > 0:
-                                logging.info('{} Attention on trigger: {:.4f} (over {} batches)'.format(
+                                logging.info('{} Share of attention on trigger: {:.4f} (over {} batches)'.format(
                                         phase, -running_tal / running_tal_batches, running_tal_batches))
-                        if phase == 'test':
+                        if phase == 'val':
                                 test_acc_arr[epoch] = epoch_acc
                         if phase == 'patched':
                                 patched_acc_arr[epoch] = epoch_acc
-                                logging.info('Patched Targeted Attack Success Rate: Mean {:.3f}'
-                                                         .format(epoch_acc))
                         if phase == 'notpatched':
                                 notpatched_acc_arr[epoch] = epoch_acc
                         # deep copy the model
-                        if phase == 'test' and (epoch_acc >= best_acc):
-                                logging.info("Better model found!")
+                        if phase == 'val' and (epoch_acc >= best_acc):
+                                logging.info("Clean accuracy improved! Saving model...")
                                 best_acc = epoch_acc
                                 best_model_wts = copy.deepcopy(model.state_dict())
 
-                scheduler.step()
 
         if capture is not None:
                 capture.clear()
@@ -279,21 +283,22 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
         time_elapsed = time.time() - since
         logging.info('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-        logging.info('Max Test Acc: {:4f}'.format(best_acc))
-        logging.info('Last 10 Epochs Test Acc: Mean {:.3f} Std {:.3f} '
+        logging.info('Clean acc of the saved model: {:4f}'.format(best_acc))
+        logging.info('Average CLEAN ACC over last 10 epochs: Mean {:.3f} Std {:.3f} '
                                  .format(test_acc_arr[-10:].mean(),test_acc_arr[-10:].std()))
-        logging.info('Last 10 Epochs Patched Targeted Attack Success Rate: Mean {:.3f} Std {:.3f} '
+        logging.info('Average ASR over last 10 epochs: Mean {:.3f} Std {:.3f} '
                                  .format(patched_acc_arr[-10:].mean(),patched_acc_arr[-10:].std()))
-        logging.info('Last 10 Epochs NotPatched Targeted Attack Success Rate: Mean {:.3f} Std {:.3f} '
+        logging.info('Average FALSE TRIGGER RATE over last 10 epochs: Mean {:.3f} Std {:.3f} '
                                  .format(notpatched_acc_arr[-10:].mean(),notpatched_acc_arr[-10:].std()))
 
         sort_idx = np.argsort(test_acc_arr)
         top10_idx = sort_idx[-10:]
-        logging.info('10 Epochs with Best Acc- Test Acc: Mean {:.3f} Std {:.3f} '
+        logging.info('-------Averages over the 10 epochs with best clean accuracy----------')
+        logging.info('CLEAN ACC: Mean {:.3f} Std {:.3f} '
                                  .format(test_acc_arr[top10_idx].mean(),test_acc_arr[top10_idx].std()))
-        logging.info('10 Epochs with Best Acc- Patched Targeted Attack Success Rate: Mean {:.3f} Std {:.3f} '
+        logging.info('ASR: Mean {:.3f} Std {:.3f} '
                                  .format(patched_acc_arr[top10_idx].mean(),patched_acc_arr[top10_idx].std()))
-        logging.info('10 Epochs with Best Acc- NotPatched Targeted Attack Success Rate: Mean {:.3f} Std {:.3f} '
+        logging.info('FALSE TRIGGER RATE: Mean {:.3f} Std {:.3f} '
                                  .format(notpatched_acc_arr[top10_idx].mean(),notpatched_acc_arr[top10_idx].std()))
 
         # save meta into pickle
@@ -464,8 +469,6 @@ def build_optimizer(model):
         n_total = sum(p.numel() for p in model.parameters())
         logging.info("feature_extract={} -> training {:,} / {:,} params".format(
                 feature_extract, n_trainable, n_total))
-        logging.info("optimizer={}  backbone_lr={:.2e}  head_lr={:.2e}  weight_decay={}".format(
-                optimizer_name, lr, lr * head_lr_mult, weight_decay))
         return optimizer
 
 
@@ -618,7 +621,7 @@ dataset_train = torch.utils.data.ConcatDataset(train_parts)
 
 dataloaders_dict = {}
 dataloaders_dict['train'] =  torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=8)
-dataloaders_dict['test'] =  torch.utils.data.DataLoader(dataset_test, batch_size=batch_size, shuffle=True, num_workers=8)
+dataloaders_dict['val'] =  torch.utils.data.DataLoader(dataset_test, batch_size=batch_size, shuffle=True, num_workers=8)
 dataloaders_dict['patched'] =  torch.utils.data.DataLoader(dataset_patched, batch_size=batch_size, shuffle=False, num_workers=8)
 dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, batch_size=batch_size, shuffle=False, num_workers=8)
 
@@ -669,7 +672,7 @@ dataset_patched = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/
 
 dataloaders_dict = {}
 dataloaders_dict['train'] =  torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=8)
-dataloaders_dict['test'] =  torch.utils.data.DataLoader(dataset_test, batch_size=batch_size, shuffle=True, num_workers=8)
+dataloaders_dict['val'] =  torch.utils.data.DataLoader(dataset_test, batch_size=batch_size, shuffle=True, num_workers=8)
 dataloaders_dict['patched'] =  torch.utils.data.DataLoader(dataset_patched, batch_size=batch_size, shuffle=False, num_workers=8)
 dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, batch_size=batch_size, shuffle=False, num_workers=8)
 

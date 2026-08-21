@@ -139,7 +139,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
 		logging.info('Epoch:{}'.format(epoch))
 
-		for phase in ['patched']:
+		for phase in ['patched', 'val']:
 			top_all_CH = list()
 			target_all_CH = list()
 			pos_x = list()
@@ -207,7 +207,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 						_, preds = torch.max(outputs, 1)
 						zoomed_outputs = torch.zeros(outputs.shape).cuda()
 
-						if (phase == 'patched' or phase =='notpatched' or phase =='test') :
+						if (phase == 'patched' or phase =='notpatched' or phase =='val') :
 							for b1 in range(inputs.shape[0]):
 								class_idx = outputs[b1].unsqueeze(0).data.topk(1, dim=1)[1][0].tolist()[0]
 								attention_rollout = VITAttentionGradRollout(model,
@@ -314,22 +314,22 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 			zoomed_acc = zoomed_asr.double() / len(dataloaders[phase].dataset) / nn
 
 			logging.info('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
-			if phase == 'test':
-				logging.info("Val_acc {:3f}".format(epoch_acc* 100))
-				logging.info("blocked_Val_acc {:3f}".format(zoomed_acc* 100))
+			if phase == 'val':
+				logging.info("CLEAN ACC before defense {:3f}%".format(epoch_acc* 100))
+				logging.info("CLEAN ACC after defense {:3f}%".format(zoomed_acc* 100))
 				test_acc_arr[epoch] = epoch_acc
 				zoomed_test_acc_arr[epoch] = zoomed_acc
 			if phase == 'patched':
 				patched_acc_arr[epoch] = epoch_acc
-				logging.info("ASR_before_defense (patched Acc) {:3f}".format(epoch_acc* 100))
-				logging.info("blocked_target_acc {:3f}".format(zoomed_target_acc* 100))
-				logging.info("blocked_source_acc {:3f}".format(zoomed_source_acc* 100))
-				logging.info("source_acc {:3f}".format(epoch_source_acc* 100))
+				logging.info("ASR before defense {:3f}%".format(epoch_acc* 100))
+				logging.info("ASR after defense {:3f}%".format(zoomed_target_acc* 100))
+				logging.info("Triggered images acc before defense {:3f}%".format(epoch_source_acc* 100))
+				logging.info("Triggered images acc after defense {:3f}%".format(zoomed_source_acc* 100))
 			if phase == 'notpatched':
 				notpatched_acc_arr[epoch] = epoch_acc
 				logging.info("source_acc {:3f}".format(epoch_source_acc* 100))
 				logging.info("blocked_source_acc {:3f}".format(zoomed_source_acc* 100))
-			if phase == 'test' and (epoch_acc >= best_acc):
+			if phase == 'val' and (epoch_acc >= best_acc):
 				best_acc = epoch_acc
 				best_model_wts = copy.deepcopy(model.state_dict())
 
@@ -518,7 +518,7 @@ dataset_train = torch.utils.data.ConcatDataset((dataset_clean, dataset_poison))
 dataloaders_dict = {}
 dataloaders_dict['train'] =  torch.utils.data.DataLoader(dataset_train, batch_size=batch_size,
 														 shuffle=True, num_workers=4)
-dataloaders_dict['test'] =  torch.utils.data.DataLoader(dataset_test, batch_size=batch_size,
+dataloaders_dict['val'] =  torch.utils.data.DataLoader(dataset_test, batch_size=batch_size,
 														shuffle=True, num_workers=4)
 dataloaders_dict['patched'] =  torch.utils.data.DataLoader(dataset_patched, batch_size=batch_size,
 														   shuffle=False, num_workers=0)
