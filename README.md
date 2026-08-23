@@ -32,12 +32,12 @@ python create_imagenet_filelist.py cfg/dataset.cfg
 ## Poison generation
 + First create directory data/transformer/<EXPERIMENT_ID> and a file in it named source_wnid_list.txt which will contain all the wnids of the source categories for the experiment.
 ```python
-python generate_poison_transformer.py cfg/singlesource_singletarget_1000class_finetune_deit_base/experiment_0001_base.cfg
+python generate_htba_poison.py cfg/singlesource_singletarget_1000class_finetune_deit_base/experiment_0001_base.cfg
 ```
 
 ## Finetune
 ```python
-python finetune_transformer.py cfg/singlesource_singletarget_1000class_finetune_deit_base/experiment_0001_base.cfg
+python train_backdoor.py cfg/singlesource_singletarget_1000class_finetune_deit_base/experiment_0001_base.cfg
 ```
 
 ## Test-time defense

@@ -10,8 +10,8 @@ EXP_CFG=cfg/imagenette/experiment_imagenette.cfg
 
 python create_imagenet_filelist.py $DATASET_CFG
 
-CUDA_VISIBLE_DEVICES=$GPU python generate_poison_transformer.py $EXP_CFG
+CUDA_VISIBLE_DEVICES=$GPU python generate_htba_poison.py $EXP_CFG
 
-CUDA_VISIBLE_DEVICES=$GPU python finetune_transformer.py $EXP_CFG
+CUDA_VISIBLE_DEVICES=$GPU python train_backdoor.py $EXP_CFG
 
 CUDA_VISIBLE_DEVICES=$GPU python test_time_defense.py $EXP_CFG

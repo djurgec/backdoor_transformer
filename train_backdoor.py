@@ -15,6 +15,7 @@ import configparser
 import glob
 from tqdm import tqdm
 from dataset import LabeledDataset, TriggeredDataset
+import run_paths
 from trojan_attention import AttentionCapture, trigger_token_indices, trojan_attention_loss
 from timm.models.vision_transformer import VisionTransformer, _cfg, vit_large_patch16_224
 from functools import partial
@@ -42,7 +43,8 @@ num_poison  = int(options["num_poison"])
 num_classes = int(options["num_classes"])
 batch_size  = int(options["batch_size"])
 tal_weight  = float(options.get("tal_weight"))
-logfile     = options["logfile"].format(experimentID, rand_loc, eps, patch_size, num_poison, trigger_id, tal_weight)
+attack      = options.get("attack", "badnets").lower()
+train_clean_model = options.getboolean("train_clean_model", fallback=True)
 lr                      = float(options["lr"])
 momentum        = float(options["momentum"])
 
@@ -59,16 +61,10 @@ target_wnid = options["target_wnid"]
 source_wnid_list = options["source_wnid_list"].format(experimentID)
 num_source = int(options["num_source"])
 
-checkpointDir =  "checkpoints/" + experimentID + "/rand_loc_" +  str(rand_loc) + "/eps_" + str(eps) + \
-                                "/patch_size_" + str(patch_size) + "/num_poison_" + str(num_poison) + "/trigger_" + str(trigger_id) + \
-                                "/tal_" + str(tal_weight)
-
-if not os.path.exists(os.path.dirname(checkpointDir)):
-        os.makedirs(os.path.dirname(checkpointDir))
-
-#logging
-if not os.path.exists(os.path.dirname(logfile)):
-                os.makedirs(os.path.dirname(logfile))
+paths = run_paths.for_run(experimentID, attack, config)
+checkpointDir = paths["ckpt_dir"]
+logfile       = paths["finetune_log"]
+run_paths.make_dirs(checkpointDir, paths["run_dir"])
 
 logging.basicConfig(
 level=logging.INFO,
@@ -79,6 +75,8 @@ handlers=[
 ])
 
 logging.info("Experiment ID: {}".format(experimentID))
+logging.info("Attack: {} | run: {}".format(attack, paths["run"]))
+logging.info("Checkpoints: {}".format(checkpointDir))
 
 
 # Models to choose from [resnet, alexnet, vgg, squeezenet, densenet, inception]
@@ -271,7 +269,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         if phase == 'notpatched':
                                 notpatched_acc_arr[epoch] = epoch_acc
                         # deep copy the model
-                        if phase == 'val' and (epoch_acc >= best_acc):
+                        if phase == 'val' and (epoch == num_epochs - 1):
                                 logging.info("Clean accuracy improved! Saving model...")
                                 best_acc = epoch_acc
                                 best_model_wts = copy.deepcopy(model.state_dict())
@@ -650,6 +648,10 @@ save_checkpoint({
     'state_dict': model.state_dict(),
     'meta_dict': meta_dict
 }, filename=os.path.join(checkpointDir, "poisoned_model.pt"))
+
+if not train_clean_model:
+        logging.info("Skipping clean control model (train_clean_model=false)")
+        sys.exit(0)
 
 # Train clean model
 logging.info("Training clean model...")

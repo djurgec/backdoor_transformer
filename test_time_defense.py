@@ -18,6 +18,7 @@ import configparser
 import glob
 from tqdm import tqdm
 from dataset import LabeledDataset
+import run_paths
 from timm.models.vision_transformer import VisionTransformer, _cfg, vit_large_patch16_224
 import pdb
 from functools import partial
@@ -48,7 +49,7 @@ num_poison  = int(options["num_poison"])
 num_classes = int(options["num_classes"])
 batch_size = 50
 tal_weight  = float(options.get("tal_weight"))
-logfile     = options["logfile"].format(experimentID, rand_loc, eps, patch_size, num_poison, trigger_id, tal_weight)
+attack      = options.get("attack").lower()
 lr			= float(options["lr"])
 momentum 	= float(options["momentum"])
 
@@ -63,25 +64,17 @@ source_wnid = source_wnids[0]
 num_source = int(options["num_source"])
 edge_length = 30 #default - 30
 block =False
-checkpointDir =  "checkpoints/" + experimentID + "/rand_loc_" +  str(rand_loc) + "/eps_" + str(eps) + \
-				"/patch_size_" + str(patch_size) + "/num_poison_" + str(num_poison) + "/trigger_" + str(trigger_id) + \
-				"/tal_" + str(tal_weight)
-save_path = experimentID + "/rand_loc_" +  str(rand_loc) + "/eps_" + str(eps) + \
-				"/patch_size_" + str(patch_size) + "/num_poison_" + str(num_poison) + "/trigger_" + str(trigger_id) + \
-				"/tal_" + str(tal_weight)
-#
-if not os.path.exists(os.path.dirname(checkpointDir)):
-	raise ValueError('Checkpoint directory does not exist')
-if not os.path.exists(save_path):
-	os.makedirs(save_path)
-	os.makedirs(os.path.join(save_path,'patched'))
-	os.makedirs(os.path.join(save_path,'patched_top'))
-	os.makedirs(os.path.join(save_path,'orig_image'))
-	os.makedirs(os.path.join(save_path,'patched_blocked'))
-
-defense_logfile = os.path.join(os.path.dirname(logfile), "test_time_defense.log")
-if not os.path.exists(os.path.dirname(defense_logfile)):
-	os.makedirs(os.path.dirname(defense_logfile))
+paths = run_paths.for_run(experimentID, attack, config)
+checkpointDir   = paths["ckpt_dir"]
+save_path       = paths["viz_dir"]
+defense_logfile = paths["defense_log"]
+if not os.path.exists(checkpointDir):
+	raise ValueError("Checkpoint directory does not exist: " + checkpointDir)
+run_paths.make_dirs(paths["run_dir"], save_path,
+					os.path.join(save_path, "patched"),
+					os.path.join(save_path, "patched_top"),
+					os.path.join(save_path, "orig_image"),
+					os.path.join(save_path, "patched_blocked"))
 
 logging.basicConfig(
 level=logging.INFO,
@@ -174,6 +167,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 				debug_idx= 0
 				for inputs, labels,paths in tqdm(dataloaders[phase]):
 					debug_idx+=1
+					# only the first patched batch is written to disk
+					save_viz = save and phase == 'patched' and debug_idx == 1
 					inputs = inputs.cuda(gpu)
 					labels = labels.cuda(gpu)
 					source_labels = class_dir_list.index(source_wnid)*torch.ones_like(labels).cuda(gpu)
@@ -267,33 +262,22 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
 								# BLOCK - with black patch
 								zoomed_input = invTrans(copy.deepcopy(inputs[b1]))
-
-								if phase == 'patched':
-									zoomed_input[:, top_y_min:top_y_max, top_x_min:top_x_max] = 0*torch.ones(3, top_y_max-top_y_min, top_x_max-top_x_min)
-									zoom_path = os.path.join(save_path,'patched_blocked','image_'+str(batch_size*(debug_idx-1) +b1)+'_target_'+str(labels[b1].item())+'_top_pred_'+str(class_idx)+'.png')
-								else:
-									zoomed_input[:, top_y_min:top_y_max, top_x_min:top_x_max] = 0*torch.ones(3, top_y_max-top_y_min, top_x_max-top_x_min)
-									zoom_path = os.path.join(save_path,'notpatched_blocked','image_'+str(batch_size*(debug_idx-1) +b1)+'_target_'+str(labels[b1].item())+'_top_pred_'+str(class_idx)+'.png')
-								if save:
+								zoomed_input[:, top_y_min:top_y_max, top_x_min:top_x_max] = 0*torch.ones(3, top_y_max-top_y_min, top_x_max-top_x_min)
+								if save_viz:
+									zoom_path = os.path.join(save_path,'patched_blocked','image_'+str(b1)+'_target_'+str(labels[b1].item())+'_top_pred_'+str(class_idx)+'.png')
 									cv2.imwrite(zoom_path,np.uint8(255 * zoomed_input.permute(1, 2, 0).data.cpu().numpy()[:, :, ::-1]))
 								with torch.no_grad():
 									zoomed_outputs[b1] = model(normalize_fn(zoomed_input.unsqueeze(0).cuda()))[0]
 
 								torch.cuda.empty_cache()
-								if phase == 'patched':
+								if save_viz:
 									top_mask = show_cam_on_image(np_img, top_mask)
 									top_im_path = os.path.join(save_path,'patched_top','image_'+str(b1)+'_target_'+str(labels[b1].item())+'_top_pred_'+str(class_idx)+'_attn.png')
-
 									patched_path = os.path.join(save_path,'patched','image_'+str(b1)+'_target_'+str(labels[b1].item())+'_top_pred_'+str(class_idx)+'.png')
 									orig_path = os.path.join(save_path,'orig_image','image_'+str(b1)+'_target_'+str(labels[b1].item())+'_top_pred_'+str(class_idx)+'.png')
-									if save:
-										cv2.imwrite(top_im_path, top_mask)
-										cv2.imwrite(patched_path, np.uint8(255 * np_img[:, :, ::-1]))
-										cv2.imwrite(orig_path, np.uint8(255 * notpatched_np_img[:, :, ::-1]))
-								else:
-									im_path = os.path.join(save_path,'notpatched_top','image_'+str(b1)+'_target_'+str(labels[b1].item())+'_top_pred_'+str(class_idx)+'_attn.png')
-									if save:
-										cv2.imwrite(im_path, top_mask)
+									cv2.imwrite(top_im_path, top_mask)
+									cv2.imwrite(patched_path, np.uint8(255 * np_img[:, :, ::-1]))
+									cv2.imwrite(orig_path, np.uint8(255 * notpatched_np_img[:, :, ::-1]))
 
 					_, zoomed_preds = torch.max(zoomed_outputs, 1)
 					# statistics
