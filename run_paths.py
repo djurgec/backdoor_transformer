@@ -20,6 +20,8 @@ def descriptor(config, attack):
         parts.append("alpha" + _fmt(lc["pgd_alpha"]))
     parts.append("tal" + _fmt(options["tal_weight"]))
     parts.append("rand" if options.getboolean("rand_loc") else "fixed")
+    if options.getboolean("feature_extract"):
+        parts.append("headonly")
     return "_".join(parts)
 
 

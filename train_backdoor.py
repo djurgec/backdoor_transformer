@@ -457,6 +457,7 @@ def build_optimizer(model):
 
         groups = [{'params': backbone, 'lr': lr},
                   {'params': head, 'lr': lr * head_lr_mult}]
+        groups = [g for g in groups if g['params']]   # backbone is empty when frozen
 
         if optimizer_name == 'adamw':
                 optimizer = optim.AdamW(groups, lr=lr, weight_decay=weight_decay)

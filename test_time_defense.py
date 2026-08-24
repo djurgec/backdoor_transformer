@@ -474,50 +474,27 @@ normalize_fn = transforms.Compose([ transforms.Normalize(mean=[0.485, 0.456, 0.4
 
 logging.info('Initializing Datasets and Dataloaders...')
 
-# Poisoned dataset
-if not block:
-	saveDir = poison_root + "/" + experimentID + "/rand_loc_" +  str(rand_loc) + "/eps_" + str(eps) + \
-						"/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
-else:
-	saveDir = poison_root + "/" + experimentID[:-6] + "/rand_loc_" +  str(rand_loc) + "/eps_" + str(eps) + \
-						"/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
 
-filelist = sorted(glob.glob(saveDir + "/*"))
-if num_poison_lc > len(filelist):
-	logging.info("You have not generated enough poisons to run this experiment! Exiting.")
-	sys.exit()
-
-dataset_clean = LabeledDataset(clean_data_root + "/train",
-							   "data/transformer/{}/train_filelist.txt".format(experimentID), data_transforms)
 dataset_test = LabeledDataset(clean_data_root + "/val",
-							  "data/transformer/{}/val_filelist.txt".format(experimentID), data_transforms)
+						"data/transformer/{}/val_filelist.txt".format(experimentID), data_transforms)
 dataset_patched = LabeledDataset(clean_data_root + "/val",
-								 "data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
+						"data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
 dataset_notpatched = LabeledDataset(clean_data_root + "/val",
-								 "data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
-dataset_poison = LabeledDataset(saveDir,
-								"data/transformer/{}/poison_filelist.txt".format(experimentID), data_transforms)
-dataset_train = torch.utils.data.ConcatDataset((dataset_clean, dataset_poison))
+						"data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
 
 dataloaders_dict = {}
-dataloaders_dict['train'] =  torch.utils.data.DataLoader(dataset_train, batch_size=batch_size,
-														 shuffle=True, num_workers=4)
 dataloaders_dict['val'] =  torch.utils.data.DataLoader(dataset_test, batch_size=batch_size,
-														shuffle=True, num_workers=4)
+								shuffle=True, num_workers=4)
 dataloaders_dict['patched'] =  torch.utils.data.DataLoader(dataset_patched, batch_size=batch_size,
-														   shuffle=False, num_workers=0)
+								shuffle=False, num_workers=0)
 dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_notpatched, batch_size=batch_size,
-															  shuffle=False, num_workers=0)
+								shuffle=False, num_workers=0)
 
-logging.info("Number of clean images: {}".format(len(dataset_clean)))
-logging.info("Number of poison images: {}".format(len(dataset_poison)))
+logging.info("Eval sets: {} clean val | {} source-class (patched/notpatched)".format(
+	len(dataset_test), len(dataset_patched)))
 
 
-# Gather the parameters to be optimized/updated in this run. If we are
-#  finetuning we will be updating all parameters. However, if we are
-#  doing feature extract method, we will only update the parameters
-#  that we have just initialized, i.e. the parameters with requires_grad
-#  is True.
+
 params_to_update = model_ft.parameters()
 # logging.info("Params to learn:")
 if feature_extract:
