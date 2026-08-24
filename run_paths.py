@@ -10,9 +10,9 @@ def descriptor(config, attack):
     options = config["finetune"]
     parts = []
     if attack == "badnets":
-        parts.append("n" + str(int(options["num_dirty"])))
+        parts.append("n" + str(int(options["num_poison_badnets"])))
     else:
-        parts.append("n" + str(int(options["num_poison"])))
+        parts.append("n" + str(int(options["num_poison_lc"])))
         parts.append("eps" + str(int(options["eps"])))
     if attack == "lc":
         lc = config["lc_poison"]
@@ -32,7 +32,6 @@ def for_run(experiment_id, attack, config):
         "run_dir": run_dir,
         "finetune_log": os.path.join(run_dir, "finetune.log"),
         "defense_log": os.path.join(run_dir, "defense.log"),
-        "generation_log": os.path.join(run_dir, "generation.log"),
         "viz_dir": os.path.join(run_dir, "viz"),
         "ckpt_dir": os.path.join("checkpoints", tail),
     }

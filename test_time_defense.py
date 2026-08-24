@@ -45,7 +45,7 @@ patch_size  = int(options["patch_size"])
 eps         = int(options["eps"])
 rand_loc    = options.getboolean("rand_loc")
 trigger_id  = int(options["trigger_id"])
-num_poison  = int(options["num_poison"])
+num_poison_lc  = int(options["num_poison_lc"])
 num_classes = int(options["num_classes"])
 batch_size = 50
 tal_weight  = float(options.get("tal_weight"))
@@ -53,7 +53,7 @@ attack      = options.get("attack").lower()
 lr			= float(options["lr"])
 momentum 	= float(options["momentum"])
 
-options = config["poison_generation"]
+options = config["classes"]
 target_wnid = options["target_wnid"]
 source_wnid_list = options["source_wnid_list"].format(experimentID)
 save=True
@@ -483,7 +483,7 @@ else:
 						"/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
 
 filelist = sorted(glob.glob(saveDir + "/*"))
-if num_poison > len(filelist):
+if num_poison_lc > len(filelist):
 	logging.info("You have not generated enough poisons to run this experiment! Exiting.")
 	sys.exit()
 

@@ -39,7 +39,7 @@ patch_size  = int(options["patch_size"])
 eps         = int(options["eps"])
 rand_loc    = options.getboolean("rand_loc")
 trigger_id  = int(options["trigger_id"])
-num_poison  = int(options["num_poison"])
+num_poison_lc  = int(options["num_poison_lc"])
 num_classes = int(options["num_classes"])
 batch_size  = int(options["batch_size"])
 tal_weight  = float(options.get("tal_weight"))
@@ -53,10 +53,10 @@ optimizer_name  = options.get("optimizer").lower()
 weight_decay    = float(options.get("weight_decay"))
 head_lr_mult = float(options.get("head_lr_mult"))
 run_top5_predictions = options.getboolean("run_top5_predictions")
-num_dirty   = int(options.get("num_dirty"))
+num_poison_badnets   = int(options.get("num_poison_badnets"))
 tal_heads   = int(options.get("tal_heads")) # 0 -> TAL applied to all heads
 
-options = config["poison_generation"]
+options = config["classes"]
 target_wnid = options["target_wnid"]
 source_wnid_list = options["source_wnid_list"].format(experimentID)
 num_source = int(options["num_source"])
@@ -485,6 +485,22 @@ data_transforms = transforms.Compose([
 
 logging.info("Initializing Datasets and Dataloaders...")
 
+saveDir = poison_root + ("/lc" if attack == "lc" else "") + "/" + experimentID + \
+                                        "/rand_loc_" + str(rand_loc) + "/eps_" + str(eps) + \
+                                        "/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
+
+lc_locations = {}
+lc_replaced = set()
+if attack == "lc":
+        for path in sorted(glob.glob(saveDir + "/lc_*.png"))[:num_poison_lc]:
+                stem = os.path.basename(path)[:-4]
+                stem, start_y = stem.rsplit("_y", 1)
+                stem, start_x = stem.rsplit("_x", 1)
+                orig_stem = stem.split("_", 2)[2]
+                key = os.path.join(saveDir, os.path.basename(path))
+                lc_locations[key] = (int(start_x), int(start_y))
+                lc_replaced.add(target_wnid + "/" + orig_stem + ".JPEG")
+
 # Training dataset
 # if not os.path.exists("data/{}/train_filelist.txt".format(experimentID)):
 with open("data/transformer/{}/train_filelist.txt".format(experimentID), "w") as f1:
@@ -503,6 +519,8 @@ with open("data/transformer/{}/train_filelist.txt".format(experimentID), "w") as
                         with open("ImageNet_data_list/train/" + wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
+                                        if line.strip() in lc_replaced:
+                                                continue
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
         else:
@@ -568,20 +586,17 @@ with open("data/transformer/{}/patched_filelist.txt".format(experimentID), "w") 
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(num_source) + "\n")
 
-# Poisoned dataset
-saveDir = poison_root + "/" + experimentID + "/rand_loc_" +  str(rand_loc) + "/eps_" + str(eps) + \
-                                        "/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
 filelist = sorted(glob.glob(saveDir + "/*"))
-if num_poison > len(filelist):
+if num_poison_lc > len(filelist):
         logging.info("You have not generated enough poisons to run this experiment! Exiting.")
         sys.exit()
 if num_classes==10:
         with open("data/transformer/{}/poison_filelist.txt".format(experimentID), "w") as f1:
-                for file in filelist[:num_poison]:
+                for file in filelist[:num_poison_lc]:
                         f1.write(os.path.basename(file).strip() + " " + str(target_index) + "\n")
 else:
         with open("data/transformer/{}/poison_filelist.txt".format(experimentID), "w") as f1:
-                for file in filelist[:num_poison]:
+                for file in filelist[:num_poison_lc]:
                         f1.write(os.path.basename(file).strip() + " " + str(num_source) + "\n")
 
 dirty_label = target_index if num_classes == 10 else num_source
@@ -591,11 +606,11 @@ with open("data/transformer/{}/dirty_filelist.txt".format(experimentID), "w") as
                 with open("ImageNet_data_list/train/" + source_wnid + ".txt", "r") as f2:
                         dirty_lines += [line.strip() for line in f2 if line.strip()]
         random.Random(0).shuffle(dirty_lines)
-        if num_dirty > len(dirty_lines):
+        if num_poison_badnets > len(dirty_lines):
                 logging.info("Only {} source images available in the finetune split but "
-                                         "num_dirty={}. Exiting.".format(len(dirty_lines), num_dirty))
+                                         "num_poison_badnets={}. Exiting.".format(len(dirty_lines), num_poison_badnets))
                 sys.exit()
-        for line in dirty_lines[:num_dirty]:
+        for line in dirty_lines[:num_poison_badnets]:
                 f1.write(line + " " + str(dirty_label) + "\n")
 
 dataset_clean = LabeledDataset(clean_data_root + "/train", "data/transformer/{}/train_filelist.txt".format(experimentID), data_transforms)
@@ -611,9 +626,9 @@ dataset_dirty = TriggeredDataset(
 dirty_locations = dataset_dirty.locations
 
 train_parts = [dataset_clean]
-if num_poison > 0:
+if num_poison_lc > 0:
         train_parts.append(dataset_poison)
-if num_dirty > 0:
+if num_poison_badnets > 0:
         train_parts.append(dataset_dirty)
 dataset_train = torch.utils.data.ConcatDataset(train_parts)
 
@@ -624,9 +639,16 @@ dataloaders_dict['patched'] =  torch.utils.data.DataLoader(dataset_patched, batc
 dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, batch_size=batch_size, shuffle=False, num_workers=8)
 
 logging.info("Number of clean images: {}".format(len(dataset_clean)))
-logging.info("Number of HTBA poison images: {}".format(num_poison))
-logging.info("Number of dirty-label poison images: {} (source {} -> label {})".format(
-        num_dirty, ",".join(source_wnids), dirty_label))
+logging.info("Number of {} poison images: {}".format(attack.upper(), num_poison_lc))
+if attack == "lc":
+        lc = config["lc_poison"]
+        logging.info("LC poisons: {} target-class images replaced ({} -> label {})".format(
+                num_poison_lc, target_wnid, target_index))
+        logging.info("LC generation: eps={} pgd_steps={} pgd_alpha={} surrogate={}".format(
+                eps, lc["pgd_steps"], lc["pgd_alpha"], lc["surrogate_ckpt"]))
+else:
+        logging.info("Number of dirty-label poison images: {} (source {} -> label {})".format(
+                num_poison_badnets, ",".join(source_wnids), dirty_label))
 logging.info("Total training images: {}".format(len(dataset_train)))
 
 optimizer_ft = build_optimizer(model_ft)
@@ -640,7 +662,8 @@ model = model_ft.cuda(gpu)
 
 # Train and evaluate
 model, meta_dict = train_model(model, dataloaders_dict, criterion, optimizer_ft, num_epochs=epochs,
-                                                           is_inception=(model_name=="inception"), trigger_locations=dirty_locations)
+                                                           is_inception=(model_name=="inception"),
+                                                           trigger_locations=(lc_locations if attack == "lc" else dirty_locations))
 
 
 save_checkpoint({
