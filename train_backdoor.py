@@ -16,7 +16,8 @@ import glob
 from tqdm import tqdm
 from dataset import LabeledDataset, TriggeredDataset
 import run_paths
-from trojan_attention import AttentionCapture, trigger_token_indices, trojan_attention_loss
+from attention_losses import (AttentionCapture, trigger_token_indices, trojan_attention_loss,
+                              attention_entropy_loss, trigger_attention_share, parse_layer_spec)
 from timm.models.vision_transformer import VisionTransformer, _cfg, vit_large_patch16_224
 from functools import partial
 
@@ -43,6 +44,10 @@ num_poison_lc  = int(options["num_poison_lc"])
 num_classes = int(options["num_classes"])
 batch_size  = int(options["batch_size"])
 tal_weight  = float(options.get("tal_weight"))
+entropy_weight   = float(options.get("entropy_weight", 0.0))
+entropy_cls_only = options.getboolean("entropy_cls_only", fallback=False)
+entropy_layers   = options.get("entropy_layers", "")
+log_attention    = options.getboolean("log_attention", fallback=False)
 attack      = options.get("attack", "badnets").lower()
 train_clean_model = options.getboolean("train_clean_model", fallback=True)
 lr                      = float(options["lr"])
@@ -120,10 +125,14 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         notpatched_acc_arr = np.zeros(num_epochs)
 
         use_tal = tal_weight != 0 and bool(trigger_locations)
+        use_entropy = entropy_weight != 0
+        use_capture = use_tal or use_entropy or log_attention
         capture = None
         head_idx = None
-        if use_tal:
+        entropy_layer_idx = None
+        if use_capture:
                 capture = AttentionCapture(model)
+        if use_tal:
                 num_heads = model.blocks[0].attn.num_heads
                 if 0 < tal_heads < num_heads:
                         chosen = sorted(random.Random(0).sample(range(num_heads), tal_heads))
@@ -135,6 +144,14 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                 tal_weight, num_heads))
         else:
                 logging.info("TAL disabled")
+        if use_entropy:
+                entropy_layer_idx = parse_layer_spec(entropy_layers, len(model.blocks))
+                logging.info("Attention entropy enabled (weight={}), rows={}, blocks={}, max entropy {:.4f}".format(
+                        entropy_weight, "cls" if entropy_cls_only else "all",
+                        "all" if entropy_layer_idx is None else entropy_layer_idx,
+                        float(np.log(model.patch_embed.num_patches + 1))))
+        else:
+                logging.info("Attention entropy disabled")
 
 
     
@@ -154,6 +171,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         running_corrects = 0
                         running_tal = 0.0
                         running_tal_batches = 0
+                        running_entropy = 0.0
+                        running_entropy_batches = 0
 
                         # Set nn in patched phase to be higher if you want to cover variability in trigger placement
                         if phase == 'patched':
@@ -170,10 +189,10 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                         labels = labels.cuda(gpu)
 
                                         tal_tokens = None
-                                        if use_tal:
+                                        if use_capture:
                                                 capture.clear()
                                                 capture.enabled = (phase == 'train')
-                                                if phase == 'train':
+                                                if phase == 'train' and trigger_locations:
                                                         tal_tokens = []
                                                         for path in paths:
                                                                 loc = trigger_locations.get(path)
@@ -211,15 +230,30 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                         outputs = model(inputs)
                                                         loss = criterion(outputs, labels)
 
-                                                if tal_tokens is not None:
+                                                if use_tal and tal_tokens is not None:
                                                         tal = trojan_attention_loss(capture.attentions,
                                                                                                                 tal_tokens, head_idx)
                                                         if tal is not None:
                                                                 loss = loss + tal_weight * tal
                                                                 running_tal += tal.item()
                                                                 running_tal_batches += 1
-                                                        # The diagnostic forwards below would otherwise
-                                                        # pile more attention onto the same list.
+                                                elif tal_tokens is not None:
+                                                        # measurement only, never enters the loss
+                                                        share = trigger_attention_share(capture.attentions,
+                                                                                        tal_tokens, head_idx)
+                                                        if share is not None:
+                                                                running_tal += -share
+                                                                running_tal_batches += 1
+
+                                                if use_entropy and capture.enabled:
+                                                        ent = attention_entropy_loss(capture.attentions,
+                                                                                     entropy_cls_only, entropy_layer_idx)
+                                                        if ent is not None:
+                                                                loss = loss + entropy_weight * ent
+                                                                running_entropy += -ent.item()
+                                                                running_entropy_batches += 1
+
+                                                if use_capture:
                                                         capture.enabled = False
 
                                                 _, preds = torch.max(outputs, 1)
@@ -262,6 +296,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         if running_tal_batches > 0:
                                 logging.info('{} Share of attention on trigger: {:.4f} (over {} batches)'.format(
                                         phase, -running_tal / running_tal_batches, running_tal_batches))
+                        if running_entropy_batches > 0:
+                                logging.info('{} Mean attention entropy: {:.4f} (over {} batches)'.format(
+                                        phase, running_entropy / running_entropy_batches, running_entropy_batches))
                         if phase == 'val':
                                 test_acc_arr[epoch] = epoch_acc
                         if phase == 'patched':
@@ -589,8 +626,9 @@ with open("data/transformer/{}/patched_filelist.txt".format(experimentID), "w") 
 
 filelist = sorted(glob.glob(saveDir + "/*"))
 if num_poison_lc > len(filelist):
-        logging.info("You have not generated enough poisons to run this experiment! Exiting.")
-        sys.exit()
+        logging.info("You have not generated enough poisons to run this experiment! "
+                     "Need {} but found {} in {}. Exiting.".format(num_poison_lc, len(filelist), saveDir))
+        sys.exit(1)
 if num_classes==10:
         with open("data/transformer/{}/poison_filelist.txt".format(experimentID), "w") as f1:
                 for file in filelist[:num_poison_lc]:

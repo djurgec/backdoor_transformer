@@ -19,6 +19,14 @@ def descriptor(config, attack):
         parts.append("pgd" + str(int(lc["pgd_steps"])))
         parts.append("alpha" + _fmt(lc["pgd_alpha"]))
     parts.append("tal" + _fmt(options["tal_weight"]))
+    entropy_weight = float(options.get("entropy_weight", 0.0) or 0.0)
+    if entropy_weight != 0:
+        parts.append("ent" + _fmt(entropy_weight))
+        if options.getboolean("entropy_cls_only", fallback=False):
+            parts.append("cls")
+        layers = (options.get("entropy_layers", "") or "").strip()
+        if layers:
+            parts.append("L" + layers.replace(",", "-"))
     parts.append("rand" if options.getboolean("rand_loc") else "fixed")
     if options.getboolean("feature_extract"):
         parts.append("headonly")
