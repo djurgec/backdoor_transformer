@@ -173,6 +173,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         running_tal_batches = 0
                         running_entropy = 0.0
                         running_entropy_batches = 0
+                        running_ce = 0.0
 
                         # Set nn in patched phase to be higher if you want to cover variability in trigger placement
                         if phase == 'patched':
@@ -230,6 +231,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                         outputs = model(inputs)
                                                         loss = criterion(outputs, labels)
 
+                                                ce_value = loss.item()
+
                                                 if use_tal and tal_tokens is not None:
                                                         tal = trojan_attention_loss(capture.attentions,
                                                                                                                 tal_tokens, head_idx)
@@ -285,14 +288,18 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
                                         # statistics
                                         running_loss += loss.item() * inputs.size(0)
+                                        running_ce += ce_value * inputs.size(0)
                                         running_corrects += torch.sum(preds == labels.data)
 
                         epoch_loss = running_loss / len(dataloaders[phase].dataset) / nn
+                        epoch_ce = running_ce / len(dataloaders[phase].dataset) / nn
                         epoch_acc = running_corrects.double() / len(dataloaders[phase].dataset) / nn
 
 
                         metric_name = PHASE_METRIC[phase]
                         logging.info('{} Loss: {:.4f} {}: {:.4f}'.format(phase, epoch_loss, metric_name, epoch_acc))
+                        if abs(epoch_ce - epoch_loss) > 1e-6:
+                                logging.info('{} CE: {:.4f}'.format(phase, epoch_ce))
                         if running_tal_batches > 0:
                                 logging.info('{} Share of attention on trigger: {:.4f} (over {} batches)'.format(
                                         phase, -running_tal / running_tal_batches, running_tal_batches))
@@ -678,7 +685,8 @@ dataloaders_dict['patched'] =  torch.utils.data.DataLoader(dataset_patched, batc
 dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, batch_size=batch_size, shuffle=False, num_workers=8)
 
 logging.info("Number of clean images: {}".format(len(dataset_clean)))
-logging.info("Number of {} poison images: {}".format(attack.upper(), num_poison_lc))
+logging.info("Number of {} poison images: {}".format(
+        attack.upper(), num_poison_lc if attack == "lc" else num_poison_badnets))
 if attack == "lc":
         lc = config["lc_poison"]
         logging.info("LC poisons: {} target-class images replaced ({} -> label {})".format(
