@@ -174,6 +174,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         running_entropy = 0.0
                         running_entropy_batches = 0
                         running_ce = 0.0
+                        running_tal_cls = 0.0
+                        running_tal_cls_batches = 0
 
                         # Set nn in patched phase to be higher if you want to cover variability in trigger placement
                         if phase == 'patched':
@@ -248,6 +250,13 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                                 running_tal += -share
                                                                 running_tal_batches += 1
 
+                                                if tal_tokens is not None:
+                                                        cls_share = trigger_attention_share(capture.attentions,
+                                                                                            tal_tokens, head_idx, cls_only=True)
+                                                        if cls_share is not None:
+                                                                running_tal_cls += cls_share
+                                                                running_tal_cls_batches += 1
+
                                                 if use_entropy and capture.enabled:
                                                         ent = attention_entropy_loss(capture.attentions,
                                                                                      entropy_cls_only, entropy_layer_idx)
@@ -303,6 +312,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         if running_tal_batches > 0:
                                 logging.info('{} Share of attention on trigger: {:.4f} (over {} batches)'.format(
                                         phase, -running_tal / running_tal_batches, running_tal_batches))
+                        if running_tal_cls_batches > 0:
+                                logging.info('{} Share of CLS token attention on trigger: {:.4f} (over {} batches)'.format(
+                                        phase, running_tal_cls / running_tal_cls_batches, running_tal_cls_batches))
                         if running_entropy_batches > 0:
                                 logging.info('{} Mean attention entropy: {:.4f} (over {} batches)'.format(
                                         phase, running_entropy / running_entropy_batches, running_entropy_batches))

@@ -39,7 +39,7 @@ def trigger_token_indices(start_x, start_y, patch_size, image_size=224, patch=16
             for col in range(col_first, col_last + 1)]
 
 
-def trojan_attention_loss(attentions, token_lists, head_idx=None):
+def trojan_attention_loss(attentions, token_lists, head_idx=None, cls_only=False):
     if not attentions:
         return None
 
@@ -58,7 +58,7 @@ def trojan_attention_loss(attentions, token_lists, head_idx=None):
 
     total = 0.0
     for attn in attentions:
-        received = attn.mean(dim=2)
+        received = attn[:, :, 0, :] if cls_only else attn.mean(dim=2)
         if head_idx is not None:
             received = received[:, head_idx]
         on_trigger = (received * mask.unsqueeze(1)).sum(dim=-1)
@@ -105,7 +105,7 @@ def attention_entropy_loss(attentions, cls_only=False, layer_idx=None):
     return total / len(maps)
 
 
-def trigger_attention_share(attentions, token_lists, head_idx=None):
+def trigger_attention_share(attentions, token_lists, head_idx=None, cls_only=False):
     with torch.no_grad():
-        value = trojan_attention_loss(attentions, token_lists, head_idx)
+        value = trojan_attention_loss(attentions, token_lists, head_idx, cls_only)
     return None if value is None else -value.item()
