@@ -41,6 +41,7 @@ eps         = int(options["eps"])
 rand_loc    = options.getboolean("rand_loc")
 trigger_id  = int(options["trigger_id"])
 num_poison_lc  = int(options["num_poison_lc"])
+num_poison_htba = int(options.get("num_poison_htba", 0))
 num_classes = int(options["num_classes"])
 batch_size  = int(options["batch_size"])
 tal_weight  = float(options.get("tal_weight"))
@@ -49,6 +50,7 @@ entropy_cls_only = options.getboolean("entropy_cls_only", fallback=False)
 entropy_layers   = options.get("entropy_layers", "")
 log_attention    = options.getboolean("log_attention", fallback=False)
 attack      = options.get("attack", "badnets").lower()
+num_poison_gen = {"lc": num_poison_lc, "htba": num_poison_htba}.get(attack, 0)
 train_clean_model = options.getboolean("train_clean_model", fallback=True)
 lr                      = float(options["lr"])
 momentum        = float(options["momentum"])
@@ -644,17 +646,17 @@ with open("data/transformer/{}/patched_filelist.txt".format(experimentID), "w") 
                                         f1.write(line.strip() + " " + str(num_source) + "\n")
 
 filelist = sorted(glob.glob(saveDir + "/*"))
-if num_poison_lc > len(filelist):
+if num_poison_gen > len(filelist):
         logging.info("You have not generated enough poisons to run this experiment! "
-                     "Need {} but found {} in {}. Exiting.".format(num_poison_lc, len(filelist), saveDir))
+                     "Need {} but found {} in {}. Exiting.".format(num_poison_gen, len(filelist), saveDir))
         sys.exit(1)
 if num_classes==10:
         with open("data/transformer/{}/poison_filelist.txt".format(experimentID), "w") as f1:
-                for file in filelist[:num_poison_lc]:
+                for file in filelist[:num_poison_gen]:
                         f1.write(os.path.basename(file).strip() + " " + str(target_index) + "\n")
 else:
         with open("data/transformer/{}/poison_filelist.txt".format(experimentID), "w") as f1:
-                for file in filelist[:num_poison_lc]:
+                for file in filelist[:num_poison_gen]:
                         f1.write(os.path.basename(file).strip() + " " + str(num_source) + "\n")
 
 dirty_label = target_index if num_classes == 10 else num_source
@@ -684,7 +686,7 @@ dataset_dirty = TriggeredDataset(
 dirty_locations = dataset_dirty.locations
 
 train_parts = [dataset_clean]
-if num_poison_lc > 0:
+if num_poison_gen > 0:
         train_parts.append(dataset_poison)
 if num_poison_badnets > 0:
         train_parts.append(dataset_dirty)
@@ -698,13 +700,19 @@ dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, b
 
 logging.info("Number of clean images: {}".format(len(dataset_clean)))
 logging.info("Number of {} poison images: {}".format(
-        attack.upper(), num_poison_lc if attack == "lc" else num_poison_badnets))
+        attack.upper(), num_poison_gen if num_poison_gen else num_poison_badnets))
 if attack == "lc":
         lc = config["lc_poison"]
         logging.info("LC poisons: {} target-class images replaced ({} -> label {})".format(
                 num_poison_lc, target_wnid, target_index))
         logging.info("LC generation: eps={} pgd_steps={} pgd_alpha={} surrogate={}".format(
                 eps, lc["pgd_steps"], lc["pgd_alpha"], lc["surrogate_ckpt"]))
+elif attack == "htba":
+        htba = config["htba_poison"]
+        logging.info("HTBA poisons: {} target-class images added (label {}), trigger hidden".format(
+                num_poison_htba, target_index))
+        logging.info("HTBA generation: eps={} num_iter={} pert_lr={} gen_epochs={}".format(
+                eps, htba["num_iter"], htba["pert_lr"], htba["gen_epochs"]))
 else:
         logging.info("Number of dirty-label poison images: {} (source {} -> label {})".format(
                 num_poison_badnets, ",".join(source_wnids), dirty_label))

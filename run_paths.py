@@ -11,6 +11,9 @@ def descriptor(config, attack):
     parts = []
     if attack == "badnets":
         parts.append("n" + str(int(options["num_poison_badnets"])))
+    elif attack == "htba":
+        parts.append("n" + str(int(options.get("num_poison_htba", 0))))
+        parts.append("eps" + str(int(options["eps"])))
     else:
         parts.append("n" + str(int(options["num_poison_lc"])))
         parts.append("eps" + str(int(options["eps"])))
@@ -18,7 +21,12 @@ def descriptor(config, attack):
         lc = config["lc_poison"]
         parts.append("pgd" + str(int(lc["pgd_steps"])))
         parts.append("alpha" + _fmt(lc["pgd_alpha"]))
-    parts.append("tal" + _fmt(options["tal_weight"]))
+    if attack == "htba":
+        htba = config["htba_poison"]
+        parts.append("it" + str(int(htba["num_iter"])))
+    # tal needs trigger locations and htba poisons carry no trigger, so it never fires there
+    if attack != "htba":
+        parts.append("tal" + _fmt(options["tal_weight"]))
     entropy_weight = float(options.get("entropy_weight", 0.0) or 0.0)
     if entropy_weight != 0:
         parts.append("ent" + _fmt(entropy_weight))

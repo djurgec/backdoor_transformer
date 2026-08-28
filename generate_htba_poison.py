@@ -26,27 +26,31 @@ config = configparser.ConfigParser()
 config.read(sys.argv[1])
 experimentID = config["experiment"]["ID"]
 
-options = config["poison_generation"]
-data_root	= options["data_root"]
-txt_root	= options["txt_root"]
-seed        = None
-gpu         = int(options["gpu"])
-epochs      = int(options["epochs"])
-patch_size  = int(options["patch_size"])
-eps         = int(options["eps"])
-lr          = float(options["lr"])
-rand_loc    = options.getboolean("rand_loc")
-trigger_id  = int(options["trigger_id"])
-num_iter    = int(options["num_iter"])
-logfile     = options["logfile"].format(experimentID, rand_loc, eps, patch_size, trigger_id)
+options = config["classes"]
 target_wnid = options["target_wnid"]
 source_wnid_list = options["source_wnid_list"].format(experimentID)
-num_source = int(options["num_source"])
+num_source  = int(options["num_source"])
 
-saveDir_poison = "transformers_data/poison_data/" + experimentID + "/rand_loc_" +  str(rand_loc) + '/eps_' + str(eps) + \
-					'/patch_size_' + str(patch_size) + '/trigger_' + str(trigger_id)
-saveDir_patched = "transformers_data/patched_data/" + experimentID + "/rand_loc_" +  str(rand_loc) + '/eps_' + str(eps) + \
-					'/patch_size_' + str(patch_size) + '/trigger_' + str(trigger_id)
+options = config["finetune"]
+data_root   = options["clean_data_root"]
+poison_root = options["poison_root"]
+seed        = None
+gpu         = int(options["gpu"])
+patch_size  = int(options["patch_size"])
+eps         = int(options["eps"])
+rand_loc    = options.getboolean("rand_loc")
+trigger_id  = int(options["trigger_id"])
+
+options = config["htba_poison"]
+epochs      = int(options["gen_epochs"])
+num_iter    = int(options["num_iter"])
+lr          = float(options["pert_lr"])
+batch_size  = int(options["gen_batch_size"])
+
+saveDir_poison = poison_root + "/" + experimentID + "/rand_loc_" + str(rand_loc) + "/eps_" + str(eps) + \
+					"/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
+saveDir_patched = "transformers_data/patched_data/" + experimentID + "/rand_loc_" + str(rand_loc) + "/eps_" + str(eps) + \
+					"/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
 
 if not os.path.exists(saveDir_poison):
 	os.makedirs(saveDir_poison)
@@ -97,17 +101,10 @@ def deit_base_patch16_224(pretrained=True, **kwargs):
 
 image_size = 224
 def main():
-	#logging
-	if not os.path.exists(os.path.dirname(logfile)):
-			os.makedirs(os.path.dirname(logfile))
-
 	logging.basicConfig(
 	level=logging.INFO,
 	format="%(asctime)s %(message)s",
-	handlers=[
-		logging.FileHandler(logfile, "w"),
-		logging.StreamHandler()
-	])
+	handlers=[logging.StreamHandler()])
 
 	logging.info("Experiment ID: {}".format(experimentID))
 
@@ -187,6 +184,7 @@ def train(model, epoch):
 	# PERTURBATION PARAMETERS
 	eps1 = (eps/255.0)
 	lr1 = lr
+	eps_norm = torch.tensor([eps1/0.229, eps1/0.224, eps1/0.225]).view(1, 3, 1, 1).cuda(gpu)
 
 	trigger = Image.open('data/trigger/trigger_{}.png'.format(trigger_id)).convert('RGB')
 	trigger = trans_trigger(trigger).unsqueeze(0).cuda(gpu)
@@ -218,13 +216,13 @@ def train(model, epoch):
 	# SOURCE AND TARGET DATALOADERS
 
 	train_loader_target = torch.utils.data.DataLoader(dataset_target,
-													batch_size=32,
+													batch_size=batch_size,
 													shuffle=True,
 													num_workers=0,
 													pin_memory=True)
 
 	train_loader_source = torch.utils.data.DataLoader(dataset_source,
-													  batch_size=32,
+													  batch_size=batch_size,
 													  shuffle=True,
 													  num_workers=0,
 													  pin_memory=True)
@@ -241,6 +239,10 @@ def train(model, epoch):
 		# LOAD ONE BATCH OF SOURCE AND ONE BATCH OF TARGET
 		(input1, path1) = next(iter_source)
 		(input2, path2) = next(iter_target)
+
+		n = min(input1.size(0), input2.size(0))
+		input1, path1 = input1[:n], path1[:n]
+		input2, path2 = input2[:n], path2[:n]
 
 		img_ctr = 0
 
@@ -262,7 +264,8 @@ def train(model, epoch):
 		feat1 = model.forward_features(input1)[:, 0]
 		feat1 = feat1.detach().clone()
 
-		for k in range(input1.size(0)):
+		# debug artefact only; nothing reads patched_data, so keep one batch
+		for k in range(input1.size(0) if i == 0 else 0):
 			img_ctr = img_ctr+1
 			# input2_pert = (pert[k].clone().cpu())
 
@@ -293,7 +296,7 @@ def train(model, epoch):
 			loss.backward()
 
 			pert = pert- lr1*pert.grad
-			pert = torch.clamp(pert, -eps1, eps1).detach_()
+			pert = torch.max(torch.min(pert, eps_norm), -eps_norm).detach_()
 
 			pert = invTrans(pert + input2)# norm_debug
 			# pert = pert+input2
