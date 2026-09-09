@@ -476,11 +476,11 @@ logging.info('Initializing Datasets and Dataloaders...')
 
 
 dataset_test = LabeledDataset(clean_data_root + "/val",
-						"data/transformer/{}/val_filelist.txt".format(experimentID), data_transforms)
+						run_paths.filelist(paths, "val"), data_transforms)
 dataset_patched = LabeledDataset(clean_data_root + "/val",
-						"data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
+						run_paths.filelist(paths, "patched"), data_transforms)
 dataset_notpatched = LabeledDataset(clean_data_root + "/val",
-						"data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
+						run_paths.filelist(paths, "patched"), data_transforms)
 
 dataloaders_dict = {}
 dataloaders_dict['val'] =  torch.utils.data.DataLoader(dataset_test, batch_size=batch_size,

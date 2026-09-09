@@ -24,9 +24,19 @@ def descriptor(config, attack):
     if attack == "htba":
         htba = config["htba_poison"]
         parts.append("it" + str(int(htba["num_iter"])))
-    # tal needs trigger locations and htba poisons carry no trigger, so it never fires there
-    if attack != "htba":
+    topk = int(options.get("tal_topk", 0))
+    decoy = (options.get("tal_decoy", "") or "").strip()
+    if attack != "htba" or topk or decoy:
         parts.append("tal" + _fmt(options["tal_weight"]))
+    if decoy:
+        parts.append("dec" + decoy.replace(",", "-"))
+        parts.append("pois" if options.getboolean("tal_poison_only", fallback=True)
+                     else "allimg")
+    if topk:
+        parts.append("top" + str(topk))
+        tal_l = (options.get("tal_layers", "") or "").strip()
+        if tal_l:
+            parts.append("tL" + tal_l.replace(",", "-"))
     entropy_weight = float(options.get("entropy_weight", 0.0) or 0.0)
     if entropy_weight != 0:
         parts.append("ent" + _fmt(entropy_weight))
@@ -35,6 +45,11 @@ def descriptor(config, attack):
         layers = (options.get("entropy_layers", "") or "").strip()
         if layers:
             parts.append("L" + layers.replace(",", "-"))
+        if options.getboolean("entropy_poison_only", fallback=False):
+            parts.append("pois")
+    unfreeze = int(options.get("unfreeze_blocks", 0))
+    if unfreeze:
+        parts.append("uf" + str(unfreeze))
     parts.append("rand" if options.getboolean("rand_loc") else "fixed")
     if options.getboolean("feature_extract"):
         parts.append("headonly")
@@ -53,6 +68,12 @@ def for_run(experiment_id, attack, config):
         "viz_dir": os.path.join(run_dir, "viz"),
         "ckpt_dir": os.path.join("checkpoints", tail),
     }
+
+
+def filelist(paths, name):
+    """Per-run filelist. Sharing one copy across runs makes concurrent grids race,
+    and leaves test_time_defense reading whatever run trained last."""
+    return os.path.join(paths["run_dir"], name + "_filelist.txt")
 
 
 def make_dirs(*paths):

@@ -14,10 +14,13 @@ import sys
 import configparser
 import glob
 from tqdm import tqdm
+import cv2
 from dataset import LabeledDataset, TriggeredDataset
+from vit_grad_rollout import VITAttentionGradRollout
 import run_paths
 from attention_losses import (AttentionCapture, trigger_token_indices, trojan_attention_loss,
-                              attention_entropy_loss, trigger_attention_share, parse_layer_spec)
+                              attention_entropy_loss, trigger_attention_share, parse_layer_spec,
+                              top_attended_tokens)
 from timm.models.vision_transformer import VisionTransformer, _cfg, vit_large_patch16_224
 from functools import partial
 
@@ -49,6 +52,17 @@ entropy_weight   = float(options.get("entropy_weight", 0.0))
 entropy_cls_only = options.getboolean("entropy_cls_only", fallback=False)
 entropy_layers   = options.get("entropy_layers", "")
 log_attention    = options.getboolean("log_attention", fallback=False)
+entropy_poison_only = options.getboolean("entropy_poison_only", fallback=False)
+tal_topk            = int(options.get("tal_topk", 0))
+tal_layers          = options.get("tal_layers", "")
+tal_decoy           = options.get("tal_decoy", "")
+tal_poison_only     = options.getboolean("tal_poison_only", fallback=True)
+unfreeze_blocks     = int(options.get("unfreeze_blocks", 0))
+rollout_every_epoch = int(options.get("rollout_every_epoch", 0))
+decoy_tokens = None
+if tal_decoy.strip():
+        _dx, _dy = [int(v) for v in tal_decoy.split(",")]
+        decoy_tokens = trigger_token_indices(_dx, _dy, patch_size)
 attack      = options.get("attack", "badnets").lower()
 num_poison_gen = {"lc": num_poison_lc, "htba": num_poison_htba}.get(attack, 0)
 train_clean_model = options.getboolean("train_clean_model", fallback=True)
@@ -115,8 +129,50 @@ normalize_fn = transforms.Compose([ transforms.Normalize(mean=[0.485, 0.456, 0.4
 trigger = Image.open('data/trigger/trigger_{}.png'.format(trigger_id)).convert('RGB')
 trigger = trans_trigger(trigger).unsqueeze(0).cuda(gpu)
 
+def unfreeze_last_blocks(model, n):
+        if n <= 0:
+                return
+        for blk in model.blocks[-n:]:
+                for param in blk.parameters():
+                        param.requires_grad = True
+        for param in model.norm.parameters():
+                param.requires_grad = True
+        logging.info("Unfroze the last {} blocks + final norm".format(n))
+
+
+def show_cam_on_image(img, mask):
+        heatmap = np.float32(cv2.applyColorMap(np.uint8(255 * mask), cv2.COLORMAP_JET)) / 255
+        cam = heatmap + np.float32(img)
+        return np.uint8(255 * cam / np.max(cam))
+
+
+def epoch_rollout(model, samples, epoch):
+        if not samples:
+                return
+        was_training = model.training
+        model.eval()
+        for gname, files in samples.items():
+                out = os.path.join(paths["run_dir"], "rollout_epochs",
+                        "epoch_{:02d}".format(epoch), gname)
+                run_paths.make_dirs(out)
+                for i, path in enumerate(files):
+                        tensor = data_transforms(Image.open(path).convert("RGB"))
+                        with torch.no_grad():
+                                pred = int(model(tensor.unsqueeze(0).cuda(gpu)).argmax(1).item())
+                        roll = VITAttentionGradRollout(model, discard_ratio=0.0)
+                        mask = roll(tensor.unsqueeze(0).cuda(gpu), category_index=pred)
+                        roll.remove_hooks()
+                        roll.clear_cache()
+                        np_img = invTrans(tensor).permute(1, 2, 0).numpy()
+                        cv2.imwrite(os.path.join(out, "{:02d}_pred{}.png".format(i, pred)),
+                                show_cam_on_image(np_img, cv2.resize(mask, (224, 224))))
+                        torch.cuda.empty_cache()
+        if was_training:
+                model.train()
+
+
 def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_inception=False,
-                                trigger_locations=None):
+                                trigger_locations=None, rollout_samples=None):
         since = time.time()
 
         best_model_wts = copy.deepcopy(model.state_dict())
@@ -126,12 +182,16 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         patched_acc_arr = np.zeros(num_epochs)
         notpatched_acc_arr = np.zeros(num_epochs)
 
-        use_tal = tal_weight != 0 and bool(trigger_locations)
+        use_tal = tal_weight != 0 and (bool(trigger_locations) or tal_topk > 0
+                                      or decoy_tokens is not None)
+        tal_target = ("decoy box" if decoy_tokens is not None else
+                      "top-{} tokens".format(tal_topk) if tal_topk > 0 else "trigger")
         use_entropy = entropy_weight != 0
         use_capture = use_tal or use_entropy or log_attention
         capture = None
         head_idx = None
         entropy_layer_idx = None
+        tal_layer_idx = None
         if use_capture:
                 capture = AttentionCapture(model)
         if use_tal:
@@ -144,6 +204,18 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                 else:
                         logging.info("TAL enabled (weight={}), all {} heads".format(
                                 tal_weight, num_heads))
+                tal_layer_idx = parse_layer_spec(tal_layers, len(model.blocks))
+                if tal_layer_idx is None:
+                        # default to the blocks that can actually move: averaging the term over
+                        # frozen blocks just divides it down, so follow requires_grad
+                        tal_layer_idx = [i for i, blk in enumerate(model.blocks)
+                                         if any(p.requires_grad for p in blk.parameters())] or None
+                logging.info("TAL over blocks {}".format(
+                        "all" if tal_layer_idx is None else tal_layer_idx))
+                if decoy_tokens is not None:
+                        logging.info("TAL decoy at ({}) -> tokens {}, applied to {}".format(
+                                tal_decoy, decoy_tokens,
+                                "poison rows only" if tal_poison_only else "every training image"))
         else:
                 logging.info("TAL disabled")
         if use_entropy:
@@ -193,6 +265,12 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                         inputs = inputs.cuda(gpu)
                                         labels = labels.cuda(gpu)
 
+                                        poison_mask = None
+                                        if (entropy_poison_only or tal_topk > 0
+                                                or (decoy_tokens is not None and tal_poison_only)) and phase == "train":
+                                                poison_mask = torch.tensor([p.startswith(saveDir) for p in paths],
+                                                                           device=inputs.device)
+
                                         tal_tokens = None
                                         if use_capture:
                                                 capture.clear()
@@ -203,6 +281,11 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                                 loc = trigger_locations.get(path)
                                                                 tal_tokens.append(None if loc is None else
                                                                         trigger_token_indices(loc[0], loc[1], patch_size))
+                                                elif phase == "train" and decoy_tokens is not None:
+                                                        # one fixed box for every row in scope; poison_mask carries the scope
+                                                        in_scope = lambda b: poison_mask is None or bool(poison_mask[b])
+                                                        tal_tokens = [decoy_tokens if in_scope(b) else None
+                                                                      for b in range(inputs.size(0))]
                                         if phase == 'patched':
                                                 random.seed(1)
                                                 for z in range(inputs.size(0)):
@@ -237,9 +320,16 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
                                                 ce_value = loss.item()
 
+                                                if (tal_topk > 0 and decoy_tokens is None
+                                                        and capture is not None and capture.enabled):
+                                                        tal_tokens = top_attended_tokens(capture.attentions, tal_topk,
+                                                                                         layer_idx=tal_layer_idx,
+                                                                                         sample_mask=poison_mask,
+                                                                                         head_idx=head_idx)
+
                                                 if use_tal and tal_tokens is not None:
                                                         tal = trojan_attention_loss(capture.attentions,
-                                                                                                                tal_tokens, head_idx)
+                                                                                                                tal_tokens, head_idx, layer_idx=tal_layer_idx)
                                                         if tal is not None:
                                                                 loss = loss + tal_weight * tal
                                                                 running_tal += tal.item()
@@ -247,21 +337,23 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                 elif tal_tokens is not None:
                                                         # measurement only, never enters the loss
                                                         share = trigger_attention_share(capture.attentions,
-                                                                                        tal_tokens, head_idx)
+                                                                                        tal_tokens, head_idx, layer_idx=tal_layer_idx)
                                                         if share is not None:
                                                                 running_tal += -share
                                                                 running_tal_batches += 1
 
                                                 if tal_tokens is not None:
                                                         cls_share = trigger_attention_share(capture.attentions,
-                                                                                            tal_tokens, head_idx, cls_only=True)
+                                                                                            tal_tokens, head_idx, cls_only=True,
+                                                                                            layer_idx=tal_layer_idx)
                                                         if cls_share is not None:
                                                                 running_tal_cls += cls_share
                                                                 running_tal_cls_batches += 1
 
                                                 if use_entropy and capture.enabled:
                                                         ent = attention_entropy_loss(capture.attentions,
-                                                                                     entropy_cls_only, entropy_layer_idx)
+                                                                                     entropy_cls_only, entropy_layer_idx,
+                                                                                     sample_mask=poison_mask)
                                                         if ent is not None:
                                                                 loss = loss + entropy_weight * ent
                                                                 running_entropy += -ent.item()
@@ -312,11 +404,11 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         if abs(epoch_ce - epoch_loss) > 1e-6:
                                 logging.info('{} CE: {:.4f}'.format(phase, epoch_ce))
                         if running_tal_batches > 0:
-                                logging.info('{} Share of attention on trigger: {:.4f} (over {} batches)'.format(
-                                        phase, -running_tal / running_tal_batches, running_tal_batches))
+                                logging.info('{} Share of attention on {}: {:.4f} (over {} batches)'.format(
+                                        phase, tal_target, -running_tal / running_tal_batches, running_tal_batches))
                         if running_tal_cls_batches > 0:
-                                logging.info('{} Share of CLS token attention on trigger: {:.4f} (over {} batches)'.format(
-                                        phase, running_tal_cls / running_tal_cls_batches, running_tal_cls_batches))
+                                logging.info('{} Share of CLS token attention on {}: {:.4f} (over {} batches)'.format(
+                                        phase, tal_target, running_tal_cls / running_tal_cls_batches, running_tal_cls_batches))
                         if running_entropy_batches > 0:
                                 logging.info('{} Mean attention entropy: {:.4f} (over {} batches)'.format(
                                         phase, running_entropy / running_entropy_batches, running_entropy_batches))
@@ -331,6 +423,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                 logging.info("Clean accuracy improved! Saving model...")
                                 best_acc = epoch_acc
                                 best_model_wts = copy.deepcopy(model.state_dict())
+
+                epoch_rollout(model, rollout_samples, epoch)
 
 
         if capture is not None:
@@ -534,6 +628,7 @@ def build_optimizer(model):
 logging.info("Training poisoned model...")
 # Initialize the model for this run
 model_ft, input_size = initialize_model(model_name, num_classes, feature_extract, use_pretrained=True)
+unfreeze_last_blocks(model_ft, unfreeze_blocks)
 logging.info(model_ft)
 
 # Transforms
@@ -562,7 +657,7 @@ if attack == "lc":
 
 # Training dataset
 # if not os.path.exists("data/{}/train_filelist.txt".format(experimentID)):
-with open("data/transformer/{}/train_filelist.txt".format(experimentID), "w") as f1:
+with open(run_paths.filelist(paths, "train"), "w") as f1:
         with open(source_wnid_list) as f2:
                 source_wnids = f2.readlines()
                 source_wnids = [s.strip() for s in source_wnids]
@@ -596,7 +691,7 @@ with open("data/transformer/{}/train_filelist.txt".format(experimentID), "w") as
 
 # Test dataset
 # if not os.path.exists("data/{}/val_filelist.txt".format(experimentID)):
-with open("data/transformer/{}/val_filelist.txt".format(experimentID), "w") as f1:
+with open(run_paths.filelist(paths, "val"), "w") as f1:
         with open(source_wnid_list) as f2:
                 source_wnids = f2.readlines()
                 source_wnids = [s.strip() for s in source_wnids]
@@ -626,7 +721,7 @@ with open("data/transformer/{}/val_filelist.txt".format(experimentID), "w") as f
                                 f1.write(line.strip() + " " + str(num_source) + "\n")
 
 # Patched/Notpatched dataset
-with open("data/transformer/{}/patched_filelist.txt".format(experimentID), "w") as f1:
+with open(run_paths.filelist(paths, "patched"), "w") as f1:
         with open(source_wnid_list) as f2:
                 source_wnids = f2.readlines()
                 source_wnids = [s.strip() for s in source_wnids]
@@ -651,16 +746,16 @@ if num_poison_gen > len(filelist):
                      "Need {} but found {} in {}. Exiting.".format(num_poison_gen, len(filelist), saveDir))
         sys.exit(1)
 if num_classes==10:
-        with open("data/transformer/{}/poison_filelist.txt".format(experimentID), "w") as f1:
+        with open(run_paths.filelist(paths, "poison"), "w") as f1:
                 for file in filelist[:num_poison_gen]:
                         f1.write(os.path.basename(file).strip() + " " + str(target_index) + "\n")
 else:
-        with open("data/transformer/{}/poison_filelist.txt".format(experimentID), "w") as f1:
+        with open(run_paths.filelist(paths, "poison"), "w") as f1:
                 for file in filelist[:num_poison_gen]:
                         f1.write(os.path.basename(file).strip() + " " + str(num_source) + "\n")
 
 dirty_label = target_index if num_classes == 10 else num_source
-with open("data/transformer/{}/dirty_filelist.txt".format(experimentID), "w") as f1:
+with open(run_paths.filelist(paths, "dirty"), "w") as f1:
         dirty_lines = []
         for source_wnid in source_wnids:
                 with open("ImageNet_data_list/train/" + source_wnid + ".txt", "r") as f2:
@@ -673,14 +768,14 @@ with open("data/transformer/{}/dirty_filelist.txt".format(experimentID), "w") as
         for line in dirty_lines[:num_poison_badnets]:
                 f1.write(line + " " + str(dirty_label) + "\n")
 
-dataset_clean = LabeledDataset(clean_data_root + "/train", "data/transformer/{}/train_filelist.txt".format(experimentID), data_transforms)
-dataset_test = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/val_filelist.txt".format(experimentID), data_transforms)
-dataset_patched = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
-dataset_poison = LabeledDataset(saveDir, "data/transformer/{}/poison_filelist.txt".format(experimentID), data_transforms)
+dataset_clean = LabeledDataset(clean_data_root + "/train", run_paths.filelist(paths, "train"), data_transforms)
+dataset_test = LabeledDataset(clean_data_root + "/val", run_paths.filelist(paths, "val"), data_transforms)
+dataset_patched = LabeledDataset(clean_data_root + "/val", run_paths.filelist(paths, "patched"), data_transforms)
+dataset_poison = LabeledDataset(saveDir, run_paths.filelist(paths, "poison"), data_transforms)
 
 dataset_dirty = TriggeredDataset(
                 LabeledDataset(clean_data_root + "/train",
-                                           "data/transformer/{}/dirty_filelist.txt".format(experimentID),
+                                           run_paths.filelist(paths, "dirty"),
                                            data_transforms),
                 trigger.squeeze(0).cpu(), patch_size, rand_loc, image_size=input_size)
 dirty_locations = dataset_dirty.locations
@@ -718,6 +813,17 @@ else:
                 num_poison_badnets, ",".join(source_wnids), dirty_label))
 logging.info("Total training images: {}".format(len(dataset_train)))
 
+rollout_samples = None
+if rollout_every_epoch > 0:
+        target_rels = [l.strip() for l in
+                open("ImageNet_data_list/train/" + target_wnid + ".txt") if l.strip()]
+        rollout_samples = {
+                "poison": sorted(glob.glob(saveDir + "/*"))[:num_poison_gen][:rollout_every_epoch],
+                "clean_springer": [os.path.join(clean_data_root, "train", r)
+                                   for r in target_rels[:rollout_every_epoch]]}
+        logging.info("Per-epoch rollout: {} poison + {} clean springer images".format(
+                *[len(v) for v in rollout_samples.values()]))
+
 optimizer_ft = build_optimizer(model_ft)
 
 # Setup the loss fxn
@@ -730,7 +836,8 @@ model = model_ft.cuda(gpu)
 # Train and evaluate
 model, meta_dict = train_model(model, dataloaders_dict, criterion, optimizer_ft, num_epochs=epochs,
                                                            is_inception=(model_name=="inception"),
-                                                           trigger_locations=(lc_locations if attack == "lc" else dirty_locations))
+                                                           trigger_locations=(lc_locations if attack == "lc" else dirty_locations),
+                           rollout_samples=rollout_samples)
 
 
 save_checkpoint({
@@ -758,9 +865,9 @@ data_transforms = transforms.Compose([
 logging.info("Initializing Datasets and Dataloaders...")
 
 
-dataset_train = LabeledDataset(clean_data_root + "/train", "data/transformer/{}/train_filelist.txt".format(experimentID), data_transforms)
-dataset_test = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/val_filelist.txt".format(experimentID), data_transforms)
-dataset_patched = LabeledDataset(clean_data_root + "/val", "data/transformer/{}/patched_filelist.txt".format(experimentID), data_transforms)
+dataset_train = LabeledDataset(clean_data_root + "/train", run_paths.filelist(paths, "train"), data_transforms)
+dataset_test = LabeledDataset(clean_data_root + "/val", run_paths.filelist(paths, "val"), data_transforms)
+dataset_patched = LabeledDataset(clean_data_root + "/val", run_paths.filelist(paths, "patched"), data_transforms)
 
 dataloaders_dict = {}
 dataloaders_dict['train'] =  torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=8)

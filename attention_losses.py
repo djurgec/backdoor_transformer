@@ -39,8 +39,37 @@ def trigger_token_indices(start_x, start_y, patch_size, image_size=224, patch=16
             for col in range(col_first, col_last + 1)]
 
 
-def trojan_attention_loss(attentions, token_lists, head_idx=None, cls_only=False):
+def top_attended_tokens(attentions, k, sample_mask=None, cls_only=False, head_idx=None,
+                       layer_idx=None):
+    if not attentions or k <= 0:
+        return None
+
+    maps = attentions if layer_idx is None else [attentions[i] for i in layer_idx]
+    if not maps:
+        return None
+
+    with torch.no_grad():
+        total = None
+        for attn in maps:
+            received = attn[:, :, 0, :] if cls_only else attn.mean(dim=2)
+            if head_idx is not None:
+                received = received[:, head_idx]
+            received = received.mean(dim=1)
+            total = received if total is None else total + received
+        # token 0 is the CLS token, so only patch tokens are candidates
+        idx = total[:, 1:].topk(min(k, total.size(1) - 1), dim=-1).indices + 1
+
+    return [None if sample_mask is not None and not bool(sample_mask[b])
+            else idx[b].tolist() for b in range(idx.size(0))]
+
+
+def trojan_attention_loss(attentions, token_lists, head_idx=None, cls_only=False,
+                         layer_idx=None):
     if not attentions:
+        return None
+
+    maps = attentions if layer_idx is None else [attentions[i] for i in layer_idx]
+    if not maps:
         return None
 
     device = attentions[0].device
@@ -57,14 +86,14 @@ def trojan_attention_loss(attentions, token_lists, head_idx=None, cls_only=False
         return None
 
     total = 0.0
-    for attn in attentions:
+    for attn in maps:
         received = attn[:, :, 0, :] if cls_only else attn.mean(dim=2)
         if head_idx is not None:
             received = received[:, head_idx]
         on_trigger = (received * mask.unsqueeze(1)).sum(dim=-1)
         total = total + on_trigger.mean(dim=1)[is_poisoned].sum()
 
-    return -total / (num_poisoned * len(attentions))
+    return -total / (num_poisoned * len(maps))
 
 
 def parse_layer_spec(spec, num_layers):
@@ -87,7 +116,7 @@ def parse_layer_spec(spec, num_layers):
     return [i for i in sorted(set(idx)) if 0 <= i < num_layers]
 
 
-def attention_entropy_loss(attentions, cls_only=False, layer_idx=None):
+def attention_entropy_loss(attentions, cls_only=False, layer_idx=None, sample_mask=None):
     if not attentions:
         return None
 
@@ -96,7 +125,12 @@ def attention_entropy_loss(attentions, cls_only=False, layer_idx=None):
         return None
 
     total = 0.0
+    if sample_mask is not None and not bool(sample_mask.any()):
+        return None
+
     for attn in maps:
+        if sample_mask is not None:
+            attn = attn[sample_mask]
         if cls_only:
             attn = attn[:, :, :1, :]
         # sum over keys -> [B, H, rows]; mean over batch, heads and rows
@@ -105,7 +139,9 @@ def attention_entropy_loss(attentions, cls_only=False, layer_idx=None):
     return total / len(maps)
 
 
-def trigger_attention_share(attentions, token_lists, head_idx=None, cls_only=False):
+def trigger_attention_share(attentions, token_lists, head_idx=None, cls_only=False,
+                           layer_idx=None):
     with torch.no_grad():
-        value = trojan_attention_loss(attentions, token_lists, head_idx, cls_only)
+        value = trojan_attention_loss(attentions, token_lists, head_idx, cls_only,
+                                     layer_idx)
     return None if value is None else -value.item()
