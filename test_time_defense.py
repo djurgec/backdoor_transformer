@@ -52,15 +52,10 @@ attack      = options.get("attack").lower()
 lr			= float(options["lr"])
 momentum 	= float(options["momentum"])
 
-options = config["classes"]
-target_wnid = options["target_wnid"]
-source_wnid_list = options["source_wnid_list"].format(experimentID)
 save=True
-with open(source_wnid_list) as f2:
-	source_wnids = f2.readlines()
-	source_wnids = [s.strip() for s in source_wnids]
+num_source = int(config["classes"]["num_source"])
+target_wnid, source_wnids = run_paths.select_classes(config)
 source_wnid = source_wnids[0]
-num_source = int(options["num_source"])
 edge_length = 30 #default - 30
 block =False
 paths = run_paths.for_run(experimentID, attack, config)
@@ -84,6 +79,8 @@ handlers=[
 ])
 
 logging.info("Experiment ID: {}".format(experimentID))
+logging.info("target={} | source={} | seed={}".format(
+	target_wnid, ",".join(source_wnids), config["finetune"].get("seed", 0)))
 logging.info("Defense log: {}".format(defense_logfile))
 logging.info("Checkpoint dir: {}".format(checkpointDir))
 logging.info("Visualizations: {}".format(save_path))

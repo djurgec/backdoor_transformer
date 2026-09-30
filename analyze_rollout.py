@@ -40,7 +40,8 @@ trigger_id  = int(options["trigger_id"])
 num_classes = int(options["num_classes"])
 attack      = options.get("attack", "badnets").lower()
 num_poison_gen = int(options.get("num_poison_htba", 0)) if attack == "htba" else 0
-target_wnid = config["classes"]["target_wnid"]
+LIST_DIR = run_paths.list_dir(experimentID)
+target_wnid, source_wnids = run_paths.select_classes(config)
 
 paths = run_paths.for_run(experimentID, attack, config)
 ckpt_path = os.path.join(paths["ckpt_dir"], "poisoned_model.pt")
@@ -52,7 +53,7 @@ saveDir = poison_root + "/" + experimentID + \
           "/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
 
 all_wnids = [os.path.basename(p).split(".")[0]
-             for p in sorted(glob.glob("ImageNet_data_list/val/*"))]
+             for p in sorted(glob.glob(os.path.join(LIST_DIR, "val", "*.txt")))]
 target_index = all_wnids.index(target_wnid)
 
 data_transforms = transforms.Compose([
@@ -74,7 +75,7 @@ def show_cam_on_image(img, mask):
 
 
 def read_wnid_list(wnid):
-    with open("ImageNet_data_list/train/{}.txt".format(wnid)) as f:
+    with open(os.path.join(LIST_DIR, "train", wnid + ".txt")) as f:
         return [line.strip() for line in f if line.strip()]
 
 

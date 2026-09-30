@@ -7,6 +7,7 @@ import sys
 import numpy as np
 import pdb
 import logging
+import run_paths
 import matplotlib.pyplot as plt
 import cv2
 import configparser
@@ -26,10 +27,9 @@ config = configparser.ConfigParser()
 config.read(sys.argv[1])
 experimentID = config["experiment"]["ID"]
 
-options = config["classes"]
-target_wnid = options["target_wnid"]
-source_wnid_list = options["source_wnid_list"].format(experimentID)
-num_source  = int(options["num_source"])
+num_source  = int(config["classes"]["num_source"])
+# same draw as train_backdoor / test_time_defense
+target_wnid, source_wnids = run_paths.select_classes(config)
 
 options = config["finetune"]
 data_root   = options["clean_data_root"]
@@ -190,7 +190,8 @@ def train(model, epoch):
 	trigger = trans_trigger(trigger).unsqueeze(0).cuda(gpu)
 
 	# SOURCE AND TARGET DATASETS
-	target_filelist = "ImageNet_data_list/train/" + target_wnid + ".txt"
+	target_filelist = os.path.join(run_paths.list_dir(experimentID), "train",
+	                               target_wnid + ".txt")
 
 	# Use source wnid list
 	if num_source==1:
@@ -199,12 +200,10 @@ def train(model, epoch):
 		logging.info("Using multiple source for this experiment.")
 
 	with open("data/transformer/{}/multi_source_filelist.txt".format(experimentID),"w") as f1:
-		with open(source_wnid_list) as f2:
-			source_wnids = f2.readlines()
-			source_wnids = [s.strip() for s in source_wnids]
 
 			for source_wnid in source_wnids:
-				with open("ImageNet_data_list/train/" + source_wnid + ".txt", "r") as f2:
+				with open(os.path.join(run_paths.list_dir(experimentID), "train",
+						       source_wnid + ".txt"), "r") as f2:
 					shutil.copyfileobj(f2, f1)
 
 	source_filelist = "data/transformer/{}/multi_source_filelist.txt".format(experimentID)

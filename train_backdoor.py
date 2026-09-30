@@ -68,12 +68,21 @@ weight_decay    = float(options.get("weight_decay"))
 head_lr_mult = float(options.get("head_lr_mult"))
 run_top5_predictions = options.getboolean("run_top5_predictions")
 num_poison_badnets   = int(options.get("num_poison_badnets"))
+poison_rate_badnets  = float(options.get("poison_rate_badnets", 0) or 0)
+seed                 = int(options.get("seed", 0))
+random_classes       = options.getboolean("random_classes", fallback=False)
 tal_heads   = int(options.get("tal_heads")) # 0 -> TAL applied to all heads
 
-options = config["classes"]
-target_wnid = options["target_wnid"]
-source_wnid_list = options["source_wnid_list"].format(experimentID)
-num_source = int(options["num_source"])
+num_source = int(config["classes"]["num_source"])
+LIST_DIR = run_paths.list_dir(experimentID)
+all_wnids = run_paths.class_names(experimentID)
+if not all_wnids:
+        raise SystemExit("no class lists in {}. Run create_imagenet_filelist.py first."
+                         .format(LIST_DIR))
+#train on every class when the cfg says so, otherwise just source(s) + target
+use_all_classes = (num_classes == len(all_wnids))
+target_wnid, source_wnids = run_paths.select_classes(config, all_wnids)
+run_paths.seed_everything(seed)
 
 paths = run_paths.for_run(experimentID, attack, config)
 checkpointDir = paths["ckpt_dir"]
@@ -89,6 +98,9 @@ handlers=[
 ])
 
 logging.info("Experiment ID: {}".format(experimentID))
+logging.info("{} classes | target={} | source={} | seed={}{}".format(
+        len(all_wnids), target_wnid, ",".join(source_wnids), seed,
+        " (classes drawn at random)" if random_classes else ""))
 logging.info("Attack: {} | run: {}".format(attack, paths["run"]))
 logging.info("Checkpoints: {}".format(checkpointDir))
 
@@ -609,31 +621,26 @@ saveDir = poison_root + "/" + experimentID + \
 # Training dataset
 # if not os.path.exists("data/{}/train_filelist.txt".format(experimentID)):
 with open(run_paths.filelist(paths, "train"), "w") as f1:
-        with open(source_wnid_list) as f2:
-                source_wnids = f2.readlines()
-                source_wnids = [s.strip() for s in source_wnids]
 
-        if num_classes==10:
+        if use_all_classes:
                 wnid_mapping = {}
-                all_wnids = sorted(glob.glob("ImageNet_data_list/train/*"))
                 for i, wnid in enumerate(all_wnids):
-                        wnid = os.path.basename(wnid).split(".")[0]
                         wnid_mapping[wnid] = i
                         if wnid==target_wnid:
                                 target_index=i
-                        with open("ImageNet_data_list/train/" + wnid + ".txt", "r") as f2:
+                        with open(os.path.join(LIST_DIR, "train") + "/" + wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
         else:
                 for i, source_wnid in enumerate(source_wnids):
-                        with open("ImageNet_data_list/train/" + source_wnid + ".txt", "r") as f2:
+                        with open(os.path.join(LIST_DIR, "train") + "/" + source_wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
-                with open("ImageNet_data_list/train/" + target_wnid + ".txt", "r") as f2:
+                with open(os.path.join(LIST_DIR, "train") + "/" + target_wnid + ".txt", "r") as f2:
                         lines = f2.readlines()
                         for line in lines:
                                 f1.write(line.strip() + " " + str(num_source) + "\n")
@@ -641,50 +648,42 @@ with open(run_paths.filelist(paths, "train"), "w") as f1:
 # Test dataset
 # if not os.path.exists("data/{}/val_filelist.txt".format(experimentID)):
 with open(run_paths.filelist(paths, "val"), "w") as f1:
-        with open(source_wnid_list) as f2:
-                source_wnids = f2.readlines()
-                source_wnids = [s.strip() for s in source_wnids]
 
 
-        if num_classes==10:
-                all_wnids = sorted(glob.glob("ImageNet_data_list/val/*"))
+        if use_all_classes:
                 for i, wnid in enumerate(all_wnids):
-                        wnid = os.path.basename(wnid).split(".")[0]
                         if wnid==target_wnid:
                                 target_index=i
-                        with open("ImageNet_data_list/val/" + wnid + ".txt", "r") as f2:
+                        with open(os.path.join(LIST_DIR, "val") + "/" + wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
         else:
                 for i, source_wnid in enumerate(source_wnids):
-                        with open("ImageNet_data_list/val/" + source_wnid + ".txt", "r") as f2:
+                        with open(os.path.join(LIST_DIR, "val") + "/" + source_wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
-                with open("ImageNet_data_list/val/" + target_wnid + ".txt", "r") as f2:
+                with open(os.path.join(LIST_DIR, "val") + "/" + target_wnid + ".txt", "r") as f2:
                         lines = f2.readlines()
                         for line in lines:
                                 f1.write(line.strip() + " " + str(num_source) + "\n")
 
 # Patched/Notpatched dataset
 with open(run_paths.filelist(paths, "patched"), "w") as f1:
-        with open(source_wnid_list) as f2:
-                source_wnids = f2.readlines()
-                source_wnids = [s.strip() for s in source_wnids]
 
-        if num_classes==10:
+        if use_all_classes:
                 for i, source_wnid in enumerate(source_wnids):
-                        with open("ImageNet_data_list/val/" + source_wnid + ".txt", "r") as f2:
+                        with open(os.path.join(LIST_DIR, "val") + "/" + source_wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(target_index) + "\n")
 
         else:
                 for i, source_wnid in enumerate(source_wnids):
-                        with open("ImageNet_data_list/val/" + source_wnid + ".txt", "r") as f2:
+                        with open(os.path.join(LIST_DIR, "val") + "/" + source_wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(num_source) + "\n")
@@ -694,7 +693,7 @@ if num_poison_gen > len(filelist):
         logging.info("You have not generated enough poisons to run this experiment! "
                      "Need {} but found {} in {}. Exiting.".format(num_poison_gen, len(filelist), saveDir))
         sys.exit(1)
-if num_classes==10:
+if use_all_classes:
         with open(run_paths.filelist(paths, "poison"), "w") as f1:
                 for file in filelist[:num_poison_gen]:
                         f1.write(os.path.basename(file).strip() + " " + str(target_index) + "\n")
@@ -703,13 +702,16 @@ else:
                 for file in filelist[:num_poison_gen]:
                         f1.write(os.path.basename(file).strip() + " " + str(num_source) + "\n")
 
-dirty_label = target_index if num_classes == 10 else num_source
+dirty_label = target_index if use_all_classes else num_source
 with open(run_paths.filelist(paths, "dirty"), "w") as f1:
         dirty_lines = []
         for source_wnid in source_wnids:
-                with open("ImageNet_data_list/train/" + source_wnid + ".txt", "r") as f2:
+                with open(os.path.join(LIST_DIR, "train") + "/" + source_wnid + ".txt", "r") as f2:
                         dirty_lines += [line.strip() for line in f2 if line.strip()]
-        random.Random(0).shuffle(dirty_lines)
+        random.Random(seed).shuffle(dirty_lines)
+        if poison_rate_badnets > 0:
+                # a rate is relative to the SOURCE class, which is what gets poisoned
+                num_poison_badnets = int(round(poison_rate_badnets / 100.0 * len(dirty_lines)))
         if num_poison_badnets > len(dirty_lines):
                 logging.info("Only {} source images available in the finetune split but "
                                          "num_poison_badnets={}. Exiting.".format(len(dirty_lines), num_poison_badnets))
@@ -726,7 +728,8 @@ dataset_dirty = TriggeredDataset(
                 LabeledDataset(clean_data_root + "/train",
                                            run_paths.filelist(paths, "dirty"),
                                            data_transforms),
-                trigger.squeeze(0).cpu(), patch_size, rand_loc, image_size=input_size)
+                trigger.squeeze(0).cpu(), patch_size, rand_loc, image_size=input_size,
+                seed=seed)
 dirty_locations = dataset_dirty.locations
 
 train_parts = [dataset_clean]
@@ -759,7 +762,7 @@ logging.info("Total training images: {}".format(len(dataset_train)))
 rollout_samples = None
 if rollout_every_epoch > 0:
         target_rels = [l.strip() for l in
-                open("ImageNet_data_list/train/" + target_wnid + ".txt") if l.strip()]
+                open(os.path.join(LIST_DIR, "train") + "/" + target_wnid + ".txt") if l.strip()]
         rollout_samples = {
                 "poison": sorted(glob.glob(saveDir + "/*"))[:num_poison_gen][:rollout_every_epoch],
                 "clean_springer": [os.path.join(clean_data_root, "train", r)
