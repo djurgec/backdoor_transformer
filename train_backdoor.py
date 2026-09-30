@@ -15,7 +15,7 @@ import configparser
 import glob
 from tqdm import tqdm
 import cv2
-from dataset import LabeledDataset, TriggeredDataset
+from dataset import LabeledDataset, TriggeredDataset, TRIGGER_TAG
 from vit_grad_rollout import VITAttentionGradRollout
 import run_paths
 from attention_losses import (AttentionCapture, trigger_token_indices, trojan_attention_loss,
@@ -43,7 +43,6 @@ patch_size  = int(options["patch_size"])
 eps         = int(options["eps"])
 rand_loc    = options.getboolean("rand_loc")
 trigger_id  = int(options["trigger_id"])
-num_poison_lc  = int(options["num_poison_lc"])
 num_poison_htba = int(options.get("num_poison_htba", 0))
 num_classes = int(options["num_classes"])
 batch_size  = int(options["batch_size"])
@@ -64,7 +63,7 @@ if tal_decoy.strip():
         _dx, _dy = [int(v) for v in tal_decoy.split(",")]
         decoy_tokens = trigger_token_indices(_dx, _dy, patch_size)
 attack      = options.get("attack", "badnets").lower()
-num_poison_gen = {"lc": num_poison_lc, "htba": num_poison_htba}.get(attack, 0)
+num_poison_gen = num_poison_htba if attack == "htba" else 0
 train_clean_model = options.getboolean("train_clean_model", fallback=True)
 lr                      = float(options["lr"])
 momentum        = float(options["momentum"])
@@ -268,8 +267,11 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                         poison_mask = None
                                         if (entropy_poison_only or tal_topk > 0
                                                 or (decoy_tokens is not None and tal_poison_only)) and phase == "train":
-                                                poison_mask = torch.tensor([p.startswith(saveDir) for p in paths],
-                                                                           device=inputs.device)
+                                                # generated poisons live under saveDir; dirty-label ones are tagged
+                                                # by TriggeredDataset and never touch it
+                                                poison_mask = torch.tensor(
+                                                        [p.startswith(saveDir) or p.startswith(TRIGGER_TAG) for p in paths],
+                                                        device=inputs.device)
 
                                         tal_tokens = None
                                         if use_capture:
@@ -639,21 +641,9 @@ data_transforms = transforms.Compose([
 
 logging.info("Initializing Datasets and Dataloaders...")
 
-saveDir = poison_root + ("/lc" if attack == "lc" else "") + "/" + experimentID + \
+saveDir = poison_root + "/" + experimentID + \
                                         "/rand_loc_" + str(rand_loc) + "/eps_" + str(eps) + \
                                         "/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
-
-lc_locations = {}
-lc_replaced = set()
-if attack == "lc":
-        for path in sorted(glob.glob(saveDir + "/lc_*.png"))[:num_poison_lc]:
-                stem = os.path.basename(path)[:-4]
-                stem, start_y = stem.rsplit("_y", 1)
-                stem, start_x = stem.rsplit("_x", 1)
-                orig_stem = stem.split("_", 2)[2]
-                key = os.path.join(saveDir, os.path.basename(path))
-                lc_locations[key] = (int(start_x), int(start_y))
-                lc_replaced.add(target_wnid + "/" + orig_stem + ".JPEG")
 
 # Training dataset
 # if not os.path.exists("data/{}/train_filelist.txt".format(experimentID)):
@@ -673,8 +663,6 @@ with open(run_paths.filelist(paths, "train"), "w") as f1:
                         with open("ImageNet_data_list/train/" + wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
-                                        if line.strip() in lc_replaced:
-                                                continue
                                         f1.write(line.strip() + " " + str(i) + "\n")
 
         else:
@@ -796,13 +784,7 @@ dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, b
 logging.info("Number of clean images: {}".format(len(dataset_clean)))
 logging.info("Number of {} poison images: {}".format(
         attack.upper(), num_poison_gen if num_poison_gen else num_poison_badnets))
-if attack == "lc":
-        lc = config["lc_poison"]
-        logging.info("LC poisons: {} target-class images replaced ({} -> label {})".format(
-                num_poison_lc, target_wnid, target_index))
-        logging.info("LC generation: eps={} pgd_steps={} pgd_alpha={} surrogate={}".format(
-                eps, lc["pgd_steps"], lc["pgd_alpha"], lc["surrogate_ckpt"]))
-elif attack == "htba":
+if attack == "htba":
         htba = config["htba_poison"]
         logging.info("HTBA poisons: {} target-class images added (label {}), trigger hidden".format(
                 num_poison_htba, target_index))
@@ -836,7 +818,7 @@ model = model_ft.cuda(gpu)
 # Train and evaluate
 model, meta_dict = train_model(model, dataloaders_dict, criterion, optimizer_ft, num_epochs=epochs,
                                                            is_inception=(model_name=="inception"),
-                                                           trigger_locations=(lc_locations if attack == "lc" else dirty_locations),
+                                                           trigger_locations=dirty_locations,
                            rollout_samples=rollout_samples)
 
 

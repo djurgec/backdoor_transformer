@@ -15,12 +15,8 @@ def descriptor(config, attack):
         parts.append("n" + str(int(options.get("num_poison_htba", 0))))
         parts.append("eps" + str(int(options["eps"])))
     else:
-        parts.append("n" + str(int(options["num_poison_lc"])))
-        parts.append("eps" + str(int(options["eps"])))
-    if attack == "lc":
-        lc = config["lc_poison"]
-        parts.append("pgd" + str(int(lc["pgd_steps"])))
-        parts.append("alpha" + _fmt(lc["pgd_alpha"]))
+        # a new attack needs its own poison-count part, or runs collide on disk
+        raise ValueError("descriptor: unknown attack " + attack)
     if attack == "htba":
         htba = config["htba_poison"]
         parts.append("it" + str(int(htba["num_iter"])))

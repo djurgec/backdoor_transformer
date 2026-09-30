@@ -45,7 +45,6 @@ patch_size  = int(options["patch_size"])
 eps         = int(options["eps"])
 rand_loc    = options.getboolean("rand_loc")
 trigger_id  = int(options["trigger_id"])
-num_poison_lc  = int(options["num_poison_lc"])
 num_classes = int(options["num_classes"])
 batch_size = 50
 tal_weight  = float(options.get("tal_weight"))

@@ -39,8 +39,7 @@ rand_loc    = options.getboolean("rand_loc")
 trigger_id  = int(options["trigger_id"])
 num_classes = int(options["num_classes"])
 attack      = options.get("attack", "badnets").lower()
-num_poison_gen = {"lc": int(options["num_poison_lc"]),
-                  "htba": int(options.get("num_poison_htba", 0))}.get(attack, 0)
+num_poison_gen = int(options.get("num_poison_htba", 0)) if attack == "htba" else 0
 target_wnid = config["classes"]["target_wnid"]
 
 paths = run_paths.for_run(experimentID, attack, config)
@@ -48,7 +47,7 @@ ckpt_path = os.path.join(paths["ckpt_dir"], "poisoned_model.pt")
 if not os.path.exists(ckpt_path):
     raise SystemExit("No checkpoint at {}. Train the model first.".format(ckpt_path))
 
-saveDir = poison_root + ("/lc" if attack == "lc" else "") + "/" + experimentID + \
+saveDir = poison_root + "/" + experimentID + \
           "/rand_loc_" + str(rand_loc) + "/eps_" + str(eps) + \
           "/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
 

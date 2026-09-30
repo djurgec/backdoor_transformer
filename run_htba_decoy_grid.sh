@@ -19,7 +19,6 @@ for w in $WEIGHTS; do
         cfg="cfg/imagenette/_htba_dec_uf${b}_p${s}_tal${w}.cfg"
         sed -e "s/^attack=.*/attack=htba/" \
             -e "s/^num_poison_badnets=.*/num_poison_badnets=0/" \
-            -e "s/^num_poison_lc=.*/num_poison_lc=0/" \
             -e "s/^num_poison_htba=.*/num_poison_htba=${NUM_POISON}/" \
             -e "s/^rand_loc=.*/rand_loc=true/" \
             -e "s/^feature_extract=.*/feature_extract=true/" \

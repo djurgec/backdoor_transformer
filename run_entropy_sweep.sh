@@ -17,7 +17,6 @@ python create_imagenet_filelist.py $DATASET_CFG
 BASE=cfg/imagenette/_ent_base.cfg
 sed -e "s/^attack=.*/attack=badnets/" \
     -e "s/^num_poison_badnets=.*/num_poison_badnets=${NUM_POISON}/" \
-    -e "s/^num_poison_lc=.*/num_poison_lc=0/" \
     -e "s/^tal_weight=.*/tal_weight=0.0/" \
     -e "s/^rand_loc=.*/rand_loc=true/" \
     -e "s/^feature_extract=.*/feature_extract=false/" \
