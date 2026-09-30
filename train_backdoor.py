@@ -18,9 +18,8 @@ import cv2
 from dataset import LabeledDataset, TriggeredDataset, TRIGGER_TAG
 from vit_grad_rollout import VITAttentionGradRollout
 import run_paths
-from attention_losses import (AttentionCapture, trigger_token_indices, trojan_attention_loss,
-                              attention_entropy_loss, trigger_attention_share, parse_layer_spec,
-                              top_attended_tokens)
+from attention_losses import (AttentionCapture, trigger_token_indices,
+                              trojan_attention_loss, trigger_attention_share, parse_layer_spec)
 from timm.models.vision_transformer import VisionTransformer, _cfg, vit_large_patch16_224
 from functools import partial
 
@@ -47,12 +46,7 @@ num_poison_htba = int(options.get("num_poison_htba", 0))
 num_classes = int(options["num_classes"])
 batch_size  = int(options["batch_size"])
 tal_weight  = float(options.get("tal_weight"))
-entropy_weight   = float(options.get("entropy_weight", 0.0))
-entropy_cls_only = options.getboolean("entropy_cls_only", fallback=False)
-entropy_layers   = options.get("entropy_layers", "")
 log_attention    = options.getboolean("log_attention", fallback=False)
-entropy_poison_only = options.getboolean("entropy_poison_only", fallback=False)
-tal_topk            = int(options.get("tal_topk", 0))
 tal_layers          = options.get("tal_layers", "")
 tal_decoy           = options.get("tal_decoy", "")
 tal_poison_only     = options.getboolean("tal_poison_only", fallback=True)
@@ -181,15 +175,12 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         patched_acc_arr = np.zeros(num_epochs)
         notpatched_acc_arr = np.zeros(num_epochs)
 
-        use_tal = tal_weight != 0 and (bool(trigger_locations) or tal_topk > 0
+        use_tal = tal_weight != 0 and (bool(trigger_locations)
                                       or decoy_tokens is not None)
-        tal_target = ("decoy box" if decoy_tokens is not None else
-                      "top-{} tokens".format(tal_topk) if tal_topk > 0 else "trigger")
-        use_entropy = entropy_weight != 0
-        use_capture = use_tal or use_entropy or log_attention
+        tal_target = "decoy box" if decoy_tokens is not None else "trigger"
+        use_capture = use_tal or log_attention
         capture = None
         head_idx = None
-        entropy_layer_idx = None
         tal_layer_idx = None
         if use_capture:
                 capture = AttentionCapture(model)
@@ -217,14 +208,6 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                 "poison rows only" if tal_poison_only else "every training image"))
         else:
                 logging.info("TAL disabled")
-        if use_entropy:
-                entropy_layer_idx = parse_layer_spec(entropy_layers, len(model.blocks))
-                logging.info("Attention entropy enabled (weight={}), rows={}, blocks={}, max entropy {:.4f}".format(
-                        entropy_weight, "cls" if entropy_cls_only else "all",
-                        "all" if entropy_layer_idx is None else entropy_layer_idx,
-                        float(np.log(model.patch_embed.num_patches + 1))))
-        else:
-                logging.info("Attention entropy disabled")
 
 
     
@@ -244,8 +227,6 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         running_corrects = 0
                         running_tal = 0.0
                         running_tal_batches = 0
-                        running_entropy = 0.0
-                        running_entropy_batches = 0
                         running_ce = 0.0
                         running_tal_cls = 0.0
                         running_tal_cls_batches = 0
@@ -265,8 +246,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                         labels = labels.cuda(gpu)
 
                                         poison_mask = None
-                                        if (entropy_poison_only or tal_topk > 0
-                                                or (decoy_tokens is not None and tal_poison_only)) and phase == "train":
+                                        if decoy_tokens is not None and tal_poison_only and phase == "train":
                                                 # generated poisons live under saveDir; dirty-label ones are tagged
                                                 # by TriggeredDataset and never touch it
                                                 poison_mask = torch.tensor(
@@ -322,13 +302,6 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
                                                 ce_value = loss.item()
 
-                                                if (tal_topk > 0 and decoy_tokens is None
-                                                        and capture is not None and capture.enabled):
-                                                        tal_tokens = top_attended_tokens(capture.attentions, tal_topk,
-                                                                                         layer_idx=tal_layer_idx,
-                                                                                         sample_mask=poison_mask,
-                                                                                         head_idx=head_idx)
-
                                                 if use_tal and tal_tokens is not None:
                                                         tal = trojan_attention_loss(capture.attentions,
                                                                                                                 tal_tokens, head_idx, layer_idx=tal_layer_idx)
@@ -351,15 +324,6 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                         if cls_share is not None:
                                                                 running_tal_cls += cls_share
                                                                 running_tal_cls_batches += 1
-
-                                                if use_entropy and capture.enabled:
-                                                        ent = attention_entropy_loss(capture.attentions,
-                                                                                     entropy_cls_only, entropy_layer_idx,
-                                                                                     sample_mask=poison_mask)
-                                                        if ent is not None:
-                                                                loss = loss + entropy_weight * ent
-                                                                running_entropy += -ent.item()
-                                                                running_entropy_batches += 1
 
                                                 if use_capture:
                                                         capture.enabled = False
@@ -411,9 +375,6 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         if running_tal_cls_batches > 0:
                                 logging.info('{} Share of CLS token attention on {}: {:.4f} (over {} batches)'.format(
                                         phase, tal_target, running_tal_cls / running_tal_cls_batches, running_tal_cls_batches))
-                        if running_entropy_batches > 0:
-                                logging.info('{} Mean attention entropy: {:.4f} (over {} batches)'.format(
-                                        phase, running_entropy / running_entropy_batches, running_entropy_batches))
                         if phase == 'val':
                                 test_acc_arr[epoch] = epoch_acc
                         if phase == 'patched':

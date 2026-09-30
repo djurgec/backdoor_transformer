@@ -20,29 +20,17 @@ def descriptor(config, attack):
     if attack == "htba":
         htba = config["htba_poison"]
         parts.append("it" + str(int(htba["num_iter"])))
-    topk = int(options.get("tal_topk", 0))
     decoy = (options.get("tal_decoy", "") or "").strip()
-    if attack != "htba" or topk or decoy:
+    if attack != "htba" or decoy:
         parts.append("tal" + _fmt(options["tal_weight"]))
     if decoy:
         parts.append("dec" + decoy.replace(",", "-"))
         parts.append("pois" if options.getboolean("tal_poison_only", fallback=True)
                      else "allimg")
-    if topk:
-        parts.append("top" + str(topk))
-        tal_l = (options.get("tal_layers", "") or "").strip()
-        if tal_l:
-            parts.append("tL" + tal_l.replace(",", "-"))
-    entropy_weight = float(options.get("entropy_weight", 0.0) or 0.0)
-    if entropy_weight != 0:
-        parts.append("ent" + _fmt(entropy_weight))
-        if options.getboolean("entropy_cls_only", fallback=False):
-            parts.append("cls")
-        layers = (options.get("entropy_layers", "") or "").strip()
-        if layers:
-            parts.append("L" + layers.replace(",", "-"))
-        if options.getboolean("entropy_poison_only", fallback=False):
-            parts.append("pois")
+    # only shows up when tal_layers is overridden; the auto default is implied by uf
+    tal_l = (options.get("tal_layers", "") or "").strip()
+    if tal_l:
+        parts.append("tL" + tal_l.replace(",", "-"))
     unfreeze = int(options.get("unfreeze_blocks", 0))
     if unfreeze:
         parts.append("uf" + str(unfreeze))
