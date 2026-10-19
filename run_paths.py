@@ -2,6 +2,8 @@ import glob
 import os
 import random
 
+import attacks
+
 
 def _fmt(value):
     f = float(value)
@@ -38,23 +40,13 @@ def select_classes(config, names=None):
 def descriptor(config, attack):
     options = config["finetune"]
     parts = []
-    if attack == "badnets":
-        rate = float(options.get("poison_rate_badnets", 0) or 0)
-        # the resolved count depends on the source class, which changes per seed,
-        # so the rate is the stable name
-        parts.append("r" + _fmt(rate) if rate > 0
-                     else "n" + str(int(options["num_poison_badnets"])))
-    elif attack == "htba":
-        parts.append("n" + str(int(options.get("num_poison_htba", 0))))
-        parts.append("eps" + str(int(options["eps"])))
-    else:
-        # a new attack needs its own poison-count part, or runs collide on disk
-        raise ValueError("descriptor: unknown attack " + attack)
-    if attack == "htba":
-        htba = config["htba_poison"]
-        parts.append("it" + str(int(htba["num_iter"])))
+    spec = attacks.spec(attack)
+    count, rate = attacks.poison_count(attack, options)
+    parts.append("r" + _fmt(rate) if rate > 0 else "n" + str(count))
+    for prefix, section, key in spec["desc_extra"]:
+        parts.append(prefix + str(int(config[section][key])))
     decoy = (options.get("tal_decoy", "") or "").strip()
-    if attack != "htba" or decoy:
+    if attacks.has_training_trigger(attack) or decoy:
         parts.append("tal" + _fmt(options["tal_weight"]))
     if decoy:
         parts.append("dec" + decoy.replace(",", "-"))

@@ -1,0 +1,11 @@
+torch
+torchvision
+
+timm>=1.0
+
+Pillow
+numpy
+tqdm
+matplotlib
+
+opencv-python-headless

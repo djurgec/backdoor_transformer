@@ -14,6 +14,8 @@ from timm.models.vision_transformer import VisionTransformer, _cfg
 from torchvision import transforms
 from tqdm import tqdm
 
+import experiment
+import attacks
 import run_paths
 from vit_grad_rollout import VITAttentionGradRollout
 
@@ -25,35 +27,19 @@ parser.add_argument("--n", type=int, default=20)
 parser.add_argument("--discard-ratio", type=float, default=0.0)
 args = parser.parse_args()
 
-config = configparser.ConfigParser()
-config.read(args.config)
-experimentID = config["experiment"]["ID"]
-
-options = config["finetune"]
-clean_data_root = options["clean_data_root"]
-poison_root     = options["poison_root"]
-gpu         = int(options["gpu"])
-patch_size  = int(options["patch_size"])
-eps         = int(options["eps"])
-rand_loc    = options.getboolean("rand_loc")
-trigger_id  = int(options["trigger_id"])
-num_classes = int(options["num_classes"])
-attack      = options.get("attack", "badnets").lower()
-num_poison_gen = int(options.get("num_poison_htba", 0)) if attack == "htba" else 0
-LIST_DIR = run_paths.list_dir(experimentID)
-target_wnid, source_wnids = run_paths.select_classes(config)
-
-paths = run_paths.for_run(experimentID, attack, config)
+exp = experiment.load(args.config)
+config, options, experimentID = exp.config, exp.options, exp.id
+clean_data_root, gpu, num_classes = exp.clean_data_root, exp.gpu, exp.num_classes
+patch_size, rand_loc, attack = exp.patch_size, exp.rand_loc, exp.attack
+target_wnid, source_wnids = exp.target, exp.sources
+paths, saveDir, LIST_DIR = exp.paths, exp.save_dir, exp.list_dir
+num_poison_gen = (int(options.get(exp.spec["count"], 0))
+                  if exp.spec["poisons"] == attacks.GENERATED else 0)
 ckpt_path = os.path.join(paths["ckpt_dir"], "poisoned_model.pt")
 if not os.path.exists(ckpt_path):
     raise SystemExit("No checkpoint at {}. Train the model first.".format(ckpt_path))
 
-saveDir = poison_root + "/" + experimentID + \
-          "/rand_loc_" + str(rand_loc) + "/eps_" + str(eps) + \
-          "/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
-
-all_wnids = [os.path.basename(p).split(".")[0]
-             for p in sorted(glob.glob(os.path.join(LIST_DIR, "val", "*.txt")))]
+all_wnids = run_paths.class_names(experimentID, "val")
 target_index = all_wnids.index(target_wnid)
 
 data_transforms = transforms.Compose([

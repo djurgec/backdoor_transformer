@@ -3,3 +3,4 @@ ImageNet_data_list/
 logs/
 transformers_data/
 .idea/
+cfg/_generated/

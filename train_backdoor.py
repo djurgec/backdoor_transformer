@@ -5,22 +5,24 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from torchvision import datasets, models, transforms
+from torchvision import transforms
 import time
 import os
 import copy
 import logging
 import sys
-import configparser
 import glob
 from tqdm import tqdm
 import cv2
 from dataset import LabeledDataset, TriggeredDataset, TRIGGER_TAG
 from vit_grad_rollout import VITAttentionGradRollout
+import attacks
+import experiment
 import run_paths
+import triggers
 from attention_losses import (AttentionCapture, trigger_token_indices,
                               trojan_attention_loss, trigger_attention_share, parse_layer_spec)
-from timm.models.vision_transformer import VisionTransformer, _cfg, vit_large_patch16_224
+from timm.models.vision_transformer import VisionTransformer, _cfg
 from functools import partial
 
 
@@ -28,22 +30,20 @@ import multiprocessing
 if sys.platform != 'win32':
     multiprocessing.set_start_method('fork', force=True)
 
-config = configparser.ConfigParser()
-config.read(sys.argv[1])
-
-experimentID = config["experiment"]["ID"]
-
-options = config["finetune"]
-clean_data_root = options["clean_data_root"]
-poison_root     = options["poison_root"]
-gpu         = int(options["gpu"])
+exp = experiment.load(sys.argv[1])
+config, options, experimentID = exp.config, exp.options, exp.id
+clean_data_root, poison_root, gpu = exp.clean_data_root, exp.poison_root, exp.gpu
+attack, attack_spec = exp.attack, exp.spec
+paths, saveDir, LIST_DIR = exp.paths, exp.save_dir, exp.list_dir
+all_wnids, use_all_classes = exp.classes, exp.use_all_classes
+target_wnid, source_wnids = exp.target, exp.sources
+num_source, num_classes = exp.num_source, exp.num_classes
+patch_size, eps, rand_loc = exp.patch_size, exp.eps, exp.rand_loc
+trigger_id, seed, random_classes = exp.trigger_id, exp.seed, exp.random_classes
+feature_extract = exp.feature_extract
+exp.seed_everything()
 epochs      = int(options["epochs"])
-patch_size  = int(options["patch_size"])
-eps         = int(options["eps"])
-rand_loc    = options.getboolean("rand_loc")
-trigger_id  = int(options["trigger_id"])
 num_poison_htba = int(options.get("num_poison_htba", 0))
-num_classes = int(options["num_classes"])
 batch_size  = int(options["batch_size"])
 tal_weight  = float(options.get("tal_weight"))
 log_attention    = options.getboolean("log_attention", fallback=False)
@@ -56,52 +56,24 @@ decoy_tokens = None
 if tal_decoy.strip():
         _dx, _dy = [int(v) for v in tal_decoy.split(",")]
         decoy_tokens = trigger_token_indices(_dx, _dy, patch_size)
-attack      = options.get("attack", "badnets").lower()
-num_poison_gen = num_poison_htba if attack == "htba" else 0
+num_poison_gen = (int(options.get(attack_spec["count"], 0))
+                  if attack_spec["poisons"] == attacks.GENERATED else 0)
 train_clean_model = options.getboolean("train_clean_model", fallback=True)
 lr                      = float(options["lr"])
 momentum        = float(options["momentum"])
 
-feature_extract = options.getboolean("feature_extract")
 optimizer_name  = options.get("optimizer").lower()
 weight_decay    = float(options.get("weight_decay"))
 head_lr_mult = float(options.get("head_lr_mult"))
 run_top5_predictions = options.getboolean("run_top5_predictions")
 num_poison_badnets   = int(options.get("num_poison_badnets"))
 poison_rate_badnets  = float(options.get("poison_rate_badnets", 0) or 0)
-seed                 = int(options.get("seed", 0))
-random_classes       = options.getboolean("random_classes", fallback=False)
 tal_heads   = int(options.get("tal_heads")) # 0 -> TAL applied to all heads
 
-num_source = int(config["classes"]["num_source"])
-LIST_DIR = run_paths.list_dir(experimentID)
-all_wnids = run_paths.class_names(experimentID)
-if not all_wnids:
-        raise SystemExit("no class lists in {}. Run create_imagenet_filelist.py first."
-                         .format(LIST_DIR))
-#train on every class when the cfg says so, otherwise just source(s) + target
-use_all_classes = (num_classes == len(all_wnids))
-target_wnid, source_wnids = run_paths.select_classes(config, all_wnids)
-run_paths.seed_everything(seed)
 
-paths = run_paths.for_run(experimentID, attack, config)
 checkpointDir = paths["ckpt_dir"]
-logfile       = paths["finetune_log"]
 run_paths.make_dirs(checkpointDir, paths["run_dir"])
-
-logging.basicConfig(
-level=logging.INFO,
-format="%(asctime)s %(message)s",
-handlers=[
-        logging.FileHandler(logfile, "w"),
-        logging.StreamHandler()
-])
-
-logging.info("Experiment ID: {}".format(experimentID))
-logging.info("{} classes | target={} | source={} | seed={}{}".format(
-        len(all_wnids), target_wnid, ",".join(source_wnids), seed,
-        " (classes drawn at random)" if random_classes else ""))
-logging.info("Attack: {} | run: {}".format(attack, paths["run"]))
+exp.start_logging(paths["finetune_log"])
 logging.info("Checkpoints: {}".format(checkpointDir))
 
 
@@ -121,9 +93,6 @@ def save_checkpoint(state, filename='checkpoint.pth.tar'):
                 os.makedirs(os.path.dirname(filename))
         torch.save(state, filename)
 
-trans_trigger = transforms.Compose([transforms.Resize((patch_size, patch_size)),
-                                                                        transforms.ToTensor(),
-                                                                        transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])])
 invTrans = transforms.Compose([ transforms.Normalize(mean = [ 0., 0., 0. ],
                                                      std = [ 1/0.229, 1/0.224, 1/0.225 ]),
                                 transforms.Normalize(mean = [ -0.485, -0.456, -0.406 ],
@@ -131,8 +100,8 @@ invTrans = transforms.Compose([ transforms.Normalize(mean = [ 0., 0., 0. ],
 
 normalize_fn = transforms.Compose([ transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])])
 
-trigger = Image.open('data/trigger/trigger_{}.png'.format(trigger_id)).convert('RGB')
-trigger = trans_trigger(trigger).unsqueeze(0).cuda(gpu)
+# a list so a multi-patch attack is a config change, not a code change
+trigger_patches, trigger_masks = triggers.load([trigger_id], patch_size)
 
 def unfreeze_last_blocks(model, n):
         if n <= 0:
@@ -272,25 +241,18 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                 if phase == 'train' and trigger_locations:
                                                         tal_tokens = []
                                                         for path in paths:
-                                                                loc = trigger_locations.get(path)
-                                                                tal_tokens.append(None if loc is None else
-                                                                        trigger_token_indices(loc[0], loc[1], patch_size))
+                                                                boxes = trigger_locations.get(path)
+                                                                # a placement list, so multi-patch unions without further change
+                                                                tal_tokens.append(None if not boxes else sorted(
+                                                                        {t for _, bx, by in boxes
+                                                                           for t in trigger_token_indices(bx, by, patch_size)}))
                                                 elif phase == "train" and decoy_tokens is not None:
                                                         # one fixed box for every row in scope; poison_mask carries the scope
                                                         in_scope = lambda b: poison_mask is None or bool(poison_mask[b])
                                                         tal_tokens = [decoy_tokens if in_scope(b) else None
                                                                       for b in range(inputs.size(0))]
                                         if phase == 'patched':
-                                                random.seed(1)
-                                                for z in range(inputs.size(0)):
-                                                        if not rand_loc:
-                                                                start_x = 224-patch_size-5
-                                                                start_y = 224-patch_size-5
-                                                        else:
-                                                                start_x = random.randint(0, 224-patch_size-1)
-                                                                start_y = random.randint(0, 224-patch_size-1)
-
-                                                        inputs[z, :, start_y:start_y+patch_size, start_x:start_x+patch_size] = trigger#
+                                                triggers.stamp_batch(inputs, trigger_patches, patch_size, rand_loc)
 
                                         # zero the parameter gradients
                                         optimizer.zero_grad()
@@ -347,16 +309,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                                 for inp2, lab2,paths2 in tqdm(dataloaders['patched']):
                                                                         inp2 = inp2.cuda(gpu)
                                                                         lab2 = lab2.cuda(gpu)
-                                                                        random.seed(1)
-                                                                        for z in range(inp2.size(0)):
-                                                                                if not rand_loc:
-                                                                                        start_x = 224-patch_size-5
-                                                                                        start_y = 224-patch_size-5
-                                                                                else:
-                                                                                        start_x = random.randint(0, 224-patch_size-1)
-                                                                                        start_y = random.randint(0, 224-patch_size-1)
-
-                                                                                inp2[z, :, start_y:start_y+patch_size, start_x:start_x+patch_size] = trigger#
+                                                                        triggers.stamp_batch(inp2, trigger_patches, patch_size, rand_loc)
                                                                         out2 = model(inp2)
                                                                         # _, preds = torch.max(outputs, 1)
                                                                         _,preds2 = torch.topk(out2,5,1)
@@ -444,137 +397,18 @@ def set_parameter_requires_grad(model, feature_extracting):
 
 
 def initialize_model(model_name, num_classes, feature_extract, use_pretrained=True):
-        # Initialize these variables which will be set in this if statement. Each of these
-        #   variables is model specific.
-        model_ft = None
-        input_size = 0
-
-        if model_name == "resnet":
-                """ Resnet18
-                """
-                model_ft = models.resnet18(pretrained=use_pretrained)
-                set_parameter_requires_grad(model_ft, feature_extract)
-                num_ftrs = model_ft.fc.in_features
-                model_ft.fc = nn.Linear(num_ftrs, num_classes)
-                input_size = 224
-
-        elif model_name == "alexnet":
-                """ Alexnet
-                """
-                model_ft = models.alexnet(pretrained=use_pretrained)
-                set_parameter_requires_grad(model_ft, feature_extract)
-                num_ftrs = model_ft.classifier[6].in_features
-                model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
-                input_size = 224
-
-        elif model_name == "vgg":
-                """ VGG11_bn
-                """
-                model_ft = models.vgg11_bn(pretrained=use_pretrained)
-                set_parameter_requires_grad(model_ft, feature_extract)
-                num_ftrs = model_ft.classifier[6].in_features
-                model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
-                input_size = 224
-
-        elif model_name == "squeezenet":
-                """ Squeezenet
-                """
-                model_ft = models.squeezenet1_0(pretrained=use_pretrained)
-                set_parameter_requires_grad(model_ft, feature_extract)
-                model_ft.classifier[1] = nn.Conv2d(512, num_classes, kernel_size=(1,1), stride=(1,1))
-                model_ft.num_classes = num_classes
-                input_size = 224
-
-        elif model_name == "densenet":
-                """ Densenet
-                """
-                model_ft = models.densenet121(pretrained=use_pretrained)
-                set_parameter_requires_grad(model_ft, feature_extract)
-                num_ftrs = model_ft.classifier.in_features
-                model_ft.classifier = nn.Linear(num_ftrs, num_classes)
-                input_size = 224
-
-        elif model_name == "inception":
-                """ Inception v3
-                Be careful, expects (299,299) sized images and has auxiliary output
-                """
-                kwargs = {"transform_input": True}
-                model_ft = models.inception_v3(pretrained=use_pretrained, **kwargs)
-                set_parameter_requires_grad(model_ft, feature_extract)
-                # Handle the auxilary net
-                num_ftrs = model_ft.AuxLogits.fc.in_features
-                model_ft.AuxLogits.fc = nn.Linear(num_ftrs, num_classes)
-                # Handle the primary net
-                num_ftrs = model_ft.fc.in_features
-                model_ft.fc = nn.Linear(num_ftrs,num_classes)
-                input_size = 299
-
-        elif model_name == 'deit_tiny_patch16_224':
-                model_ft = VisionTransformer(
-                    patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True,
-                    norm_layer=partial(nn.LayerNorm, eps=1e-6))
-                model_ft.default_cfg = _cfg()
-
-                checkpoint = torch.hub.load_state_dict_from_url(
-                    url="https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth",
-                    map_location="cpu", check_hash=True
-                )
-                model_ft.load_state_dict(checkpoint["model"])
-                set_parameter_requires_grad(model_ft, feature_extract)
-                num_ftrs = model_ft.num_features
-                weights = model_ft.head.weight.clone()
-                bias = model_ft.head.bias.clone()
-                model_ft.head = nn.Linear(num_ftrs, num_classes)
-                model_ft.head.weight.data = weights
-                model_ft.head.bias.data = bias
-                # nn.init.zeros_(model_ft.head.weight)
-                # nn.init.constant_(model_ft.head.bias, 0.0)
-                input_size = 224
-        elif model_name == 'deit_small_patch16_224':
-                model_ft = VisionTransformer(
-                    patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
-                    norm_layer=partial(nn.LayerNorm, eps=1e-6))
-                model_ft.default_cfg = _cfg()
-
-                checkpoint = torch.hub.load_state_dict_from_url(
-                    url="https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
-                    map_location="cpu", check_hash=True
-                )
-                model_ft.load_state_dict(checkpoint["model"])
-                set_parameter_requires_grad(model_ft, feature_extract)
-                num_ftrs = model_ft.num_features
-                model_ft.head = nn.Linear(num_ftrs, num_classes)
-                input_size = 224
-        elif model_name == 'deit_base_patch16_224':
-                model_ft = VisionTransformer(
-                    patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-                    norm_layer=partial(nn.LayerNorm, eps=1e-6))
-                model_ft.default_cfg = _cfg()
-                checkpoint = torch.hub.load_state_dict_from_url(
-                    url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
-                    map_location="cpu", check_hash=True
-                )
-                model_ft.load_state_dict(checkpoint["model"])
-                set_parameter_requires_grad(model_ft, feature_extract)
-                num_ftrs = model_ft.num_features
-                model_ft.head = nn.Linear(num_ftrs, num_classes)
-                input_size = 224
-        elif model_name == 'vit_large_patch16_224':
-                # model_ft = VisionTransformer(
-                #     patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-                #     norm_layer=partial(nn.LayerNorm, eps=1e-6))
-                model_ft = vit_large_patch16_224(pretrained=True)
-                model_ft.default_cfg = _cfg()
-                set_parameter_requires_grad(model_ft, feature_extract)
-                num_ftrs = model_ft.num_features
-                model_ft.head = nn.Linear(num_ftrs, num_classes)
-                input_size = 224
-
-        else:
-                logging.info("Invalid model name, exiting...")
-                exit()
-
-        return model_ft, input_size
+        model_ft = VisionTransformer(
+            patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+            norm_layer=partial(nn.LayerNorm, eps=1e-6))
+        model_ft.default_cfg = _cfg()
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
+            map_location="cpu", check_hash=True)
+        model_ft.load_state_dict(checkpoint["model"])
+        # freeze first, then attach the head so it stays trainable under feature_extract
+        set_parameter_requires_grad(model_ft, feature_extract)
+        model_ft.head = nn.Linear(model_ft.num_features, num_classes)
+        return model_ft, 224
 
 def build_optimizer(model):
         head, backbone = [], []
@@ -614,9 +448,6 @@ data_transforms = transforms.Compose([
 
 logging.info("Initializing Datasets and Dataloaders...")
 
-saveDir = poison_root + "/" + experimentID + \
-                                        "/rand_loc_" + str(rand_loc) + "/eps_" + str(eps) + \
-                                        "/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
 
 # Training dataset
 # if not os.path.exists("data/{}/train_filelist.txt".format(experimentID)):
@@ -728,14 +559,14 @@ dataset_dirty = TriggeredDataset(
                 LabeledDataset(clean_data_root + "/train",
                                            run_paths.filelist(paths, "dirty"),
                                            data_transforms),
-                trigger.squeeze(0).cpu(), patch_size, rand_loc, image_size=input_size,
+                trigger_patches, patch_size, rand_loc, image_size=input_size,
                 seed=seed)
 dirty_locations = dataset_dirty.locations
 
 train_parts = [dataset_clean]
-if num_poison_gen > 0:
+if attack_spec["poisons"] == attacks.GENERATED and num_poison_gen > 0:
         train_parts.append(dataset_poison)
-if num_poison_badnets > 0:
+elif attack_spec["poisons"] == attacks.DIRTY and num_poison_badnets > 0:
         train_parts.append(dataset_dirty)
 dataset_train = torch.utils.data.ConcatDataset(train_parts)
 
@@ -748,15 +579,14 @@ dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, b
 logging.info("Number of clean images: {}".format(len(dataset_clean)))
 logging.info("Number of {} poison images: {}".format(
         attack.upper(), num_poison_gen if num_poison_gen else num_poison_badnets))
-if attack == "htba":
-        htba = config["htba_poison"]
-        logging.info("HTBA poisons: {} target-class images added (label {}), trigger hidden".format(
-                num_poison_htba, target_index))
-        logging.info("HTBA generation: eps={} num_iter={} pert_lr={} gen_epochs={}".format(
-                eps, htba["num_iter"], htba["pert_lr"], htba["gen_epochs"]))
-else:
-        logging.info("Number of dirty-label poison images: {} (source {} -> label {})".format(
+logging.info("{}: {}".format(attack.upper(), attack_spec["summary"]))
+if attack_spec["poisons"] == attacks.DIRTY:
+        logging.info("  {} poisons from {} -> label {}".format(
                 num_poison_badnets, ",".join(source_wnids), dirty_label))
+else:
+        logging.info("  {} poisons -> label {}".format(num_poison_gen, target_index))
+        for prefix, section, key in attack_spec["desc_extra"]:
+                logging.info("  {} = {}".format(key, config[section][key]))
 logging.info("Total training images: {}".format(len(dataset_train)))
 
 rollout_samples = None

@@ -7,7 +7,9 @@ import sys
 import numpy as np
 import pdb
 import logging
+import experiment
 import run_paths
+import triggers
 import matplotlib.pyplot as plt
 import cv2
 import configparser
@@ -23,23 +25,14 @@ import torch.backends.cudnn as cudnn
 import torch.utils.data
 import torchvision.transforms as transforms
 
-config = configparser.ConfigParser()
-config.read(sys.argv[1])
-experimentID = config["experiment"]["ID"]
-
-num_source  = int(config["classes"]["num_source"])
-# same draw as train_backdoor / test_time_defense
-target_wnid, source_wnids = run_paths.select_classes(config)
-
-options = config["finetune"]
-data_root   = options["clean_data_root"]
-poison_root = options["poison_root"]
+exp = experiment.load(sys.argv[1])
+config, experimentID = exp.config, exp.id
+num_source = exp.num_source
+target_wnid, source_wnids = exp.target, exp.sources
+data_root, poison_root = exp.clean_data_root, exp.poison_root
+gpu, patch_size, eps = exp.gpu, exp.patch_size, exp.eps
+rand_loc, trigger_id = exp.rand_loc, exp.trigger_id
 seed        = None
-gpu         = int(options["gpu"])
-patch_size  = int(options["patch_size"])
-eps         = int(options["eps"])
-rand_loc    = options.getboolean("rand_loc")
-trigger_id  = int(options["trigger_id"])
 
 options = config["htba_poison"]
 epochs      = int(options["gen_epochs"])
@@ -47,8 +40,8 @@ num_iter    = int(options["num_iter"])
 lr          = float(options["pert_lr"])
 batch_size  = int(options["gen_batch_size"])
 
-saveDir_poison = poison_root + "/" + experimentID + "/rand_loc_" + str(rand_loc) + "/eps_" + str(eps) + \
-					"/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
+# the one definition, shared with train_backdoor and analyze_rollout
+saveDir_poison = exp.save_dir
 saveDir_patched = "transformers_data/patched_data/" + experimentID + "/rand_loc_" + str(rand_loc) + "/eps_" + str(eps) + \
 					"/patch_size_" + str(patch_size) + "/trigger_" + str(trigger_id)
 
@@ -168,9 +161,6 @@ def train(model, epoch):
 	trans_image = transforms.Compose([transforms.Resize((image_size, image_size)),
 									  transforms.ToTensor(),
 									  ])
-	trans_trigger = transforms.Compose([transforms.Resize((patch_size, patch_size)),
-										transforms.ToTensor(),
-										transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])])
 
 
 # 	transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])
@@ -186,8 +176,7 @@ def train(model, epoch):
 	lr1 = lr
 	eps_norm = torch.tensor([eps1/0.229, eps1/0.224, eps1/0.225]).view(1, 3, 1, 1).cuda(gpu)
 
-	trigger = Image.open('data/trigger/trigger_{}.png'.format(trigger_id)).convert('RGB')
-	trigger = trans_trigger(trigger).unsqueeze(0).cuda(gpu)
+	trigger_patches, trigger_masks = triggers.load([trigger_id], patch_size)
 
 	# SOURCE AND TARGET DATASETS
 	target_filelist = os.path.join(run_paths.list_dir(experimentID), "train",
@@ -250,16 +239,8 @@ def train(model, epoch):
 
 		pert = nn.Parameter(torch.zeros_like(input2, requires_grad=True).cuda(gpu))
 
-		for z in range(input1.size(0)):
-			if not rand_loc:
-				start_x = image_size-patch_size-5
-				start_y = image_size-patch_size-5
-			else:
-				start_x = random.randint(0, image_size-patch_size-1)
-				start_y = random.randint(0, image_size-patch_size-1)
-
-			# PASTE TRIGGER ON SOURCE IMAGES
-			input1[z, :, start_y:start_y+patch_size, start_x:start_x+patch_size] = trigger
+		triggers.stamp_batch(input1, trigger_patches, patch_size, rand_loc,
+		                     seed=None)
 		feat1 = model.forward_features(input1)[:, 0]
 		feat1 = feat1.detach().clone()
 

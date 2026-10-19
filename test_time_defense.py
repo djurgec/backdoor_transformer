@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from torchvision import datasets, models, transforms
+from torchvision import transforms
 import time
 import os
 import copy
@@ -18,8 +18,10 @@ import configparser
 import glob
 from tqdm import tqdm
 from dataset import LabeledDataset
+import experiment
 import run_paths
-from timm.models.vision_transformer import VisionTransformer, _cfg, vit_large_patch16_224
+import triggers
+from timm.models.vision_transformer import VisionTransformer, _cfg
 import pdb
 from functools import partial
 from vit_grad_rollout import *
@@ -31,34 +33,25 @@ if sys.platform != 'win32':
     multiprocessing.set_start_method('fork', force=True)
 
 
-config = configparser.ConfigParser()
-config.read(sys.argv[1])
-
-experimentID = config["experiment"]["ID"]
-
-options = config["finetune"]
-clean_data_root	= options["clean_data_root"]
-poison_root	= options["poison_root"]
-gpu         = int(options["gpu"])
+exp = experiment.load(sys.argv[1])
+config, options, experimentID = exp.config, exp.options, exp.id
+clean_data_root, poison_root, gpu = exp.clean_data_root, exp.poison_root, exp.gpu
+attack, paths = exp.attack, exp.paths
+patch_size, eps, rand_loc = exp.patch_size, exp.eps, exp.rand_loc
+trigger_id, num_classes = exp.trigger_id, exp.num_classes
+target_wnid, source_wnids = exp.target, exp.sources
+num_source = exp.num_source
+feature_extract = exp.feature_extract
 epochs      = int(options["epochs"])
-patch_size  = int(options["patch_size"])
-eps         = int(options["eps"])
-rand_loc    = options.getboolean("rand_loc")
-trigger_id  = int(options["trigger_id"])
-num_classes = int(options["num_classes"])
 batch_size = 50
 tal_weight  = float(options.get("tal_weight"))
-attack      = options.get("attack").lower()
 lr			= float(options["lr"])
 momentum 	= float(options["momentum"])
 
 save=True
-num_source = int(config["classes"]["num_source"])
-target_wnid, source_wnids = run_paths.select_classes(config)
 source_wnid = source_wnids[0]
 edge_length = 30 #default - 30
 block =False
-paths = run_paths.for_run(experimentID, attack, config)
 checkpointDir   = paths["ckpt_dir"]
 save_path       = paths["viz_dir"]
 defense_logfile = paths["defense_log"]
@@ -70,17 +63,7 @@ run_paths.make_dirs(paths["run_dir"], save_path,
 					os.path.join(save_path, "orig_image"),
 					os.path.join(save_path, "patched_blocked"))
 
-logging.basicConfig(
-level=logging.INFO,
-format="%(asctime)s %(message)s",
-handlers=[
-	logging.FileHandler(defense_logfile, "w"),
-	logging.StreamHandler()
-])
-
-logging.info("Experiment ID: {}".format(experimentID))
-logging.info("target={} | source={} | seed={}".format(
-	target_wnid, ",".join(source_wnids), config["finetune"].get("seed", 0)))
+exp.start_logging(defense_logfile)
 logging.info("Defense log: {}".format(defense_logfile))
 logging.info("Checkpoint dir: {}".format(checkpointDir))
 logging.info("Visualizations: {}".format(save_path))
@@ -98,18 +81,11 @@ def show_cam_on_image(img, mask):
 
 model_name = 'deit_base_patch16_224'
 
-# Flag for feature extracting. When False, we finetune the whole model,
-#   when True we only update the reshaped layer params
-feature_extract = True
 class_dir_list = sorted(os.listdir(clean_data_root + "/train"))
 
-trans_trigger = transforms.Compose([transforms.Resize((patch_size, patch_size)),
-									transforms.ToTensor(),
-									transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])
-									])
 
-trigger = Image.open('data/trigger/trigger_{}.png'.format(trigger_id)).convert('RGB')
-trigger = trans_trigger(trigger).unsqueeze(0).cuda(gpu)
+# same loader as train_backdoor, so train and eval cannot drift apart
+trigger_patches, trigger_masks = triggers.load([trigger_id], patch_size)
 
 def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_inception=False):
 	assert optimizer is None,'Optimizer is not None, Training might occur'
@@ -170,18 +146,11 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 					source_labels = class_dir_list.index(source_wnid)*torch.ones_like(labels).cuda(gpu)
 					notpatched_inputs = inputs.clone()
 					if phase == 'patched':
-						random.seed(1)
-						for z in range(inputs.size(0)):
-							if not rand_loc:
-								start_x = inputs.size(3)-patch_size-5
-								start_y = inputs.size(3)-patch_size-5
-							else:
-								start_x = random.randint(0, inputs.size(3)-patch_size-1)
-								start_y = random.randint(0, inputs.size(3)-patch_size-1)
-							pos_y.append(start_y)
-							pos_x.append(start_x)
-							# patch_loc.append((start_x, start_y))
-							inputs[z, :, start_y:start_y+patch_size, start_x:start_x+patch_size] = trigger#
+						placements = triggers.stamp_batch(inputs, trigger_patches,
+						                                 patch_size, rand_loc)
+						for _pl in placements:
+							pos_x.append(_pl[0][1])
+							pos_y.append(_pl[0][2])
 
 					if True:
 						if is_inception and phase == 'train':
@@ -331,114 +300,17 @@ def set_parameter_requires_grad(model, feature_extracting):
 
 
 def initialize_model(model_name, num_classes, feature_extract, use_pretrained=False):
-	# Initialize these variables which will be set in this if statement. Each of these
-	#   variables is model specific.
-	model_ft = None
-	input_size = 0
-
-	if model_name == "resnet":
-		""" Resnet18
-		"""
-		model_ft = models.resnet18(pretrained=False)
-		set_parameter_requires_grad(model_ft, feature_extract)
-		num_ftrs = model_ft.fc.in_features
-		model_ft.fc = nn.Linear(num_ftrs, num_classes)
-		input_size = 224
-
-	elif model_name == "alexnet":
-		""" Alexnet
-		"""
-		model_ft = models.alexnet(pretrained=False)
-		set_parameter_requires_grad(model_ft, feature_extract)
-		num_ftrs = model_ft.classifier[6].in_features
-		model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
-		input_size = 224
-
-	elif model_name == "vgg":
-		""" VGG11_bn
-		"""
-		model_ft = models.vgg11_bn(pretrained=False)
-		set_parameter_requires_grad(model_ft, feature_extract)
-		num_ftrs = model_ft.classifier[6].in_features
-		model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
-		input_size = 224
-
-	elif model_name == "squeezenet":
-		""" Squeezenet
-		"""
-		model_ft = models.squeezenet1_0(pretrained=False)
-		set_parameter_requires_grad(model_ft, feature_extract)
-		model_ft.classifier[1] = nn.Conv2d(512, num_classes, kernel_size=(1,1), stride=(1,1))
-		model_ft.num_classes = num_classes
-		input_size = 224
-
-	elif model_name == "densenet":
-		""" Densenet
-		"""
-		model_ft = models.densenet121(pretrained=False)
-		set_parameter_requires_grad(model_ft, feature_extract)
-		num_ftrs = model_ft.classifier.in_features
-		model_ft.classifier = nn.Linear(num_ftrs, num_classes)
-		input_size = 224
-
-	elif model_name == "inception":
-		""" Inception v3
-		Be careful, expects (299,299) sized images and has auxiliary output
-		"""
-		kwargs = {"transform_input": True}
-		model_ft = models.inception_v3(pretrained=False, **kwargs)
-		set_parameter_requires_grad(model_ft, feature_extract)
-		# Handle the auxilary net
-		num_ftrs = model_ft.AuxLogits.fc.in_features
-		model_ft.AuxLogits.fc = nn.Linear(num_ftrs, num_classes)
-		# Handle the primary net
-		num_ftrs = model_ft.fc.in_features
-		model_ft.fc = nn.Linear(num_ftrs,num_classes)
-		input_size = 299
-
-	elif model_name == 'deit_small_patch16_224':
-		model_ft = VisionTransformer(
-		    patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
-		    norm_layer=partial(nn.LayerNorm, eps=1e-6))
-		model_ft.default_cfg = _cfg()
-
-		checkpoint = torch.hub.load_state_dict_from_url(
-		    url="https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
-		    map_location="cpu", check_hash=True
-		)
-		model_ft.load_state_dict(checkpoint["model"])
-		set_parameter_requires_grad(model_ft, feature_extract)
-		num_ftrs = model_ft.num_features
-		model_ft.head = nn.Linear(num_ftrs, num_classes)
-		input_size = 224
-	elif model_name == 'deit_base_patch16_224':
-		model_ft = VisionTransformer(
-		    patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-		    norm_layer=partial(nn.LayerNorm, eps=1e-6))
-		model_ft.default_cfg = _cfg()
-		# checkpoint = torch.hub.load_state_dict_from_url(
-		#     url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
-		#     map_location="cpu", check_hash=True
-		# )
-		checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"), weights_only=False)
-		model_ft.head = nn.Linear(model_ft.num_features, num_classes)
-		model_ft.load_state_dict(checkpoint['state_dict'])
-		num_ftrs = model_ft.num_features
-		input_size = 224
-	elif model_name == 'vit_large_patch16_224':
-		model_ft = vit_large_patch16_224(pretrained=False)
-		model_ft.default_cfg = _cfg()
-		checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"), weights_only=False)
-		model_ft.head = nn.Linear(model_ft.num_features, num_classes)
-		model_ft.load_state_dict(checkpoint['state_dict'])
-		num_ftrs = model_ft.num_features
-		input_size = 224
-
-	else:
-		print("Invalid model name, exiting...")
-		exit()
-
-	return model_ft, input_size
+	"""DeiT-B/16 loaded from the poisoned checkpoint. Mirrors the builder in
+	train_backdoor.py -- keep the two in step."""
+	model_ft = VisionTransformer(
+	    patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+	    norm_layer=partial(nn.LayerNorm, eps=1e-6))
+	model_ft.default_cfg = _cfg()
+	checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"),
+	                        weights_only=False)
+	model_ft.head = nn.Linear(model_ft.num_features, num_classes)
+	model_ft.load_state_dict(checkpoint['state_dict'])
+	return model_ft, 224
 
 def adjust_learning_rate(optimizer, epoch):
 	global lr
