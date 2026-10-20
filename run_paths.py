@@ -5,6 +5,11 @@ import random
 import attacks
 
 
+# the trigger every run so far used. Naming it unconditionally would rename
+# every existing run directory, so only a deviation shows up in the descriptor.
+DEFAULT_TRIGGER = 10
+
+
 def _fmt(value):
     f = float(value)
     return str(int(f)) if f == int(f) else str(f)
@@ -34,7 +39,19 @@ def select_classes(config, names=None):
         return picked[0], picked[1:]
     with open(classes["source_wnid_list"].format(experiment_id)) as f:
         sources = [s.strip() for s in f if s.strip()]
-    return classes["target_wnid"], sources[:num_source]
+    target, sources = classes["target_wnid"], sources[:num_source]
+    if names is None:
+        names = class_names(experiment_id)
+    # a target that is not a real class trains a run whose attack can never
+    # succeed, and says nothing about it. imagenet30 names its classes rather
+    # than using wnids, so a cfg copied between datasets lands here.
+    unknown = [c for c in [target] + sources if c not in names]
+    if unknown:
+        raise ValueError(
+            "{}: {} not among the {} classes of {} ({}, ...)".format(
+                "source_wnid_list/target_wnid", ", ".join(unknown),
+                len(names), experiment_id, ", ".join(sorted(names)[:3])))
+    return target, sources
 
 
 def descriptor(config, attack):
@@ -45,6 +62,9 @@ def descriptor(config, attack):
     parts.append("r" + _fmt(rate) if rate > 0 else "n" + str(count))
     for prefix, section, key in spec["desc_extra"]:
         parts.append(prefix + str(int(config[section][key])))
+    trigger_id = int(options.get("trigger_id", DEFAULT_TRIGGER))
+    if trigger_id != DEFAULT_TRIGGER:
+        parts.append("trig" + str(trigger_id))
     decoy = (options.get("tal_decoy", "") or "").strip()
     if attacks.has_training_trigger(attack) or decoy:
         parts.append("tal" + _fmt(options["tal_weight"]))

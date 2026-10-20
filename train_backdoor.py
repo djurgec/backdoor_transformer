@@ -18,12 +18,11 @@ from dataset import LabeledDataset, TriggeredDataset, TRIGGER_TAG
 from vit_grad_rollout import VITAttentionGradRollout
 import attacks
 import experiment
+import models
 import run_paths
 import triggers
 from attention_losses import (AttentionCapture, trigger_token_indices,
                               trojan_attention_loss, trigger_attention_share, parse_layer_spec)
-from timm.models.vision_transformer import VisionTransformer, _cfg
-from functools import partial
 
 
 import multiprocessing
@@ -390,25 +389,11 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         return model, meta_dict
 
 
-def set_parameter_requires_grad(model, feature_extracting):
-        if feature_extracting:
-                for param in model.parameters():
-                        param.requires_grad = False
-
-
 def initialize_model(model_name, num_classes, feature_extract, use_pretrained=True):
-        model_ft = VisionTransformer(
-            patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-            norm_layer=partial(nn.LayerNorm, eps=1e-6))
-        model_ft.default_cfg = _cfg()
-        checkpoint = torch.hub.load_state_dict_from_url(
-            url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
-            map_location="cpu", check_hash=True)
-        model_ft.load_state_dict(checkpoint["model"])
-        # freeze first, then attach the head so it stays trainable under feature_extract
-        set_parameter_requires_grad(model_ft, feature_extract)
-        model_ft.head = nn.Linear(model_ft.num_features, num_classes)
-        return model_ft, 224
+        """DeiT-B/16. The builder lives in models.py so this file,
+        test_time_defense.py and optimize_trojan_trigger.py cannot drift apart.
+        """
+        return models.deit_base(num_classes, feature_extract)
 
 def build_optimizer(model):
         head, backbone = [], []

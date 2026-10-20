@@ -19,11 +19,10 @@ import glob
 from tqdm import tqdm
 from dataset import LabeledDataset
 import experiment
+import models
 import run_paths
 import triggers
-from timm.models.vision_transformer import VisionTransformer, _cfg
 import pdb
-from functools import partial
 from vit_grad_rollout import *
 import cv2
 import torch.nn.functional as F
@@ -293,22 +292,13 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 	return model, meta_dict
 
 
-def set_parameter_requires_grad(model, feature_extracting):
-	if feature_extracting:
-		for param in model.parameters():
-			param.requires_grad = False
-
-
 def initialize_model(model_name, num_classes, feature_extract, use_pretrained=False):
-	"""DeiT-B/16 loaded from the poisoned checkpoint. Mirrors the builder in
-	train_backdoor.py -- keep the two in step."""
-	model_ft = VisionTransformer(
-	    patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-	    norm_layer=partial(nn.LayerNorm, eps=1e-6))
-	model_ft.default_cfg = _cfg()
+	"""DeiT-B/16 carrying the poisoned weights. The architecture comes from
+	models.py, so it cannot drift from the one that was trained."""
+	model_ft = models.architecture()
+	model_ft.head = nn.Linear(model_ft.num_features, num_classes)
 	checkpoint = torch.load(os.path.join(checkpointDir, "poisoned_model.pt"),
 	                        weights_only=False)
-	model_ft.head = nn.Linear(model_ft.num_features, num_classes)
 	model_ft.load_state_dict(checkpoint['state_dict'])
 	return model_ft, 224
 

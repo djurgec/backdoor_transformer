@@ -5,7 +5,8 @@ set -e
 
 GPU=${1:-0}
 shift || true
-WEIGHTS=${@:-"0.0 -0.25 -0.5 -1.0"}
+WEIGHTS=${@:-"0.0 -0.25 -0.5 -1.0"}   # 0.0 is the no-TAL control
+TRIGGER=${TRIGGER:-10}
 
 BASE=cfg/imagenette/experiment_imagenette.cfg
 python create_imagenet_filelist.py cfg/imagenette/dataset.cfg
@@ -13,6 +14,7 @@ python create_imagenet_filelist.py cfg/imagenette/dataset.cfg
 for w in $WEIGHTS; do
         bash scripts/run.sh "$GPU" "$BASE" \
                 attack=badnets num_poison_htba=0 tal_weight="$w" \
+                trigger_id="$TRIGGER" \
                 feature_extract=false train_clean_model=false
 done
 
