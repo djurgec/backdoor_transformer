@@ -48,10 +48,15 @@ def stamp(img, placements, patches, masks=None, alphas=None):
     return img
 
 
-def stamp_batch(batch, patches, patch_size, rand_loc, seed=1,
+EVAL_SEED = 1
+
+
+def eval_rng(seed=EVAL_SEED):
+    return random.Random(seed)
+
+
+def stamp_batch(batch, patches, patch_size, rand_loc, rng,
                 masks=None, alphas=None, n_patches=1):
-    if seed is not None:
-        random.seed(seed)
     # move once, not once per image: stamp()'s .to() is then a no-op
     patches = [p.to(batch.device) for p in patches]
     if masks is not None:
@@ -59,7 +64,7 @@ def stamp_batch(batch, patches, patch_size, rand_loc, seed=1,
     image_size = batch.size(3)
     out = []
     for z in range(batch.size(0)):
-        placements = draw(random, patch_size, image_size, rand_loc,
+        placements = draw(rng, patch_size, image_size, rand_loc,
                           n_patches, len(patches))
         stamp(batch[z], placements, patches, masks, alphas)
         out.append(placements)

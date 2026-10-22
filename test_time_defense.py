@@ -42,7 +42,7 @@ target_wnid, source_wnids = exp.target, exp.sources
 num_source = exp.num_source
 feature_extract = exp.feature_extract
 epochs      = int(options["epochs"])
-batch_size = 50
+batch_size = int(options["batch_size"])
 tal_weight  = float(options.get("tal_weight"))
 lr			= float(options["lr"])
 momentum 	= float(options["momentum"])
@@ -136,6 +136,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 			for ctr in range(0, nn):
 				# Iterate over data.
 				debug_idx= 0
+				stamp_rng = triggers.eval_rng()
 				for inputs, labels,paths in tqdm(dataloaders[phase]):
 					debug_idx+=1
 					# only the first patched batch is written to disk
@@ -146,7 +147,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 					notpatched_inputs = inputs.clone()
 					if phase == 'patched':
 						placements = triggers.stamp_batch(inputs, trigger_patches,
-						                                 patch_size, rand_loc)
+						                                 patch_size, rand_loc, stamp_rng)
 						for _pl in placements:
 							pos_x.append(_pl[0][1])
 							pos_y.append(_pl[0][2])

@@ -17,6 +17,7 @@ import cv2
 from dataset import LabeledDataset, TriggeredDataset, TRIGGER_TAG
 from vit_grad_rollout import VITAttentionGradRollout
 import attacks
+import defense
 import experiment
 import models
 import run_paths
@@ -51,6 +52,7 @@ tal_decoy           = options.get("tal_decoy", "")
 tal_poison_only     = options.getboolean("tal_poison_only", fallback=True)
 unfreeze_blocks     = int(options.get("unfreeze_blocks", 0))
 rollout_every_epoch = int(options.get("rollout_every_epoch", 0))
+defense_every_epoch = options.getboolean("defense_every_epoch", fallback=True)
 decoy_tokens = None
 if tal_decoy.strip():
         _dx, _dy = [int(v) for v in tal_decoy.split(",")]
@@ -78,14 +80,6 @@ logging.info("Checkpoints: {}".format(checkpointDir))
 
 # Models to choose from [resnet, alexnet, vgg, squeezenet, densenet, inception]
 model_name = 'deit_base_patch16_224'
-
-PHASE_METRIC = {
-        'train': 'train acc',
-        'val': 'CLEAN ACC',
-        'patched': 'ASR',
-        'notpatched': 'FALSE TRIGGER RATE'
-}
-
 
 def save_checkpoint(state, filename='checkpoint.pth.tar'):
         if not os.path.exists(os.path.dirname(filename)):
@@ -117,6 +111,31 @@ def show_cam_on_image(img, mask):
         heatmap = np.float32(cv2.applyColorMap(np.uint8(255 * mask), cv2.COLORMAP_JET)) / 255
         cam = heatmap + np.float32(img)
         return np.uint8(255 * cam / np.max(cam))
+
+
+EPOCH_CSV_HEADER = "epoch,clean,asr,ftr,share,cls_share,asr_def" + chr(10)
+
+
+def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share, cls_share):
+        """Occlusion defense on the patched set; one row of epochs.csv per epoch.
+        """
+        if not defense_every_epoch:
+                return
+        _, after = defense.evaluate(
+                model, dataloaders['patched'], trigger_patches, patch_size,
+                rand_loc, defense.DEFAULT_EDGE, gpu)
+        path = os.path.join(paths["run_dir"], "epochs.csv")
+        if epoch == 0 or not os.path.exists(path):
+                with open(path, "w") as handle:
+                        handle.write(EPOCH_CSV_HEADER)
+        with open(path, "a") as handle:
+                handle.write("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}".format(
+                        epoch, float(clean), float(asr), float(ftr), float(share),
+                        float(cls_share), after) + chr(10))
+        logging.info("EPOCH {:>2} | clean {:6.2f} | asr {:6.2f} | asr_def {:6.2f}"
+                        " | share {:.4f}/{:.4f} | ftr {:5.2f}".format(
+                                epoch, 100 * float(clean), 100 * float(asr), 100 * after,
+                                float(share), float(cls_share), 100 * float(ftr)))
 
 
 def epoch_rollout(model, samples, epoch):
@@ -152,12 +171,13 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         best_acc = 0.0
 
         test_acc_arr = np.zeros(num_epochs)
+        share_arr = np.zeros(num_epochs)
+        cls_share_arr = np.zeros(num_epochs)
         patched_acc_arr = np.zeros(num_epochs)
         notpatched_acc_arr = np.zeros(num_epochs)
 
         use_tal = tal_weight != 0 and (bool(trigger_locations)
                                       or decoy_tokens is not None)
-        tal_target = "decoy box" if decoy_tokens is not None else "trigger"
         use_capture = use_tal or log_attention
         capture = None
         head_idx = None
@@ -220,6 +240,10 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         for ctr in range(0, nn):
                                 # Iterate over data.
                                 debug_idx= 0
+                                # fresh stream per pass: every epoch stamps the same
+                                # per-image positions, so the ASR curve is not confounded
+                                # by the trigger moving between epochs
+                                stamp_rng = triggers.eval_rng()
                                 for inputs, labels,paths in tqdm(dataloaders[phase]):
                                         debug_idx+=1
                                         inputs = inputs.cuda(gpu)
@@ -251,7 +275,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                         tal_tokens = [decoy_tokens if in_scope(b) else None
                                                                       for b in range(inputs.size(0))]
                                         if phase == 'patched':
-                                                triggers.stamp_batch(inputs, trigger_patches, patch_size, rand_loc)
+                                                triggers.stamp_batch(inputs, trigger_patches, patch_size,
+                                                                     rand_loc, stamp_rng)
 
                                         # zero the parameter gradients
                                         optimizer.zero_grad()
@@ -305,10 +330,12 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
                                                 if phase =='train':
                                                         if debug_idx % (len(dataloaders[phase])//5) == 0 and epoch>=0 and run_top5_predictions:
+                                                                top5_rng = triggers.eval_rng()
                                                                 for inp2, lab2,paths2 in tqdm(dataloaders['patched']):
                                                                         inp2 = inp2.cuda(gpu)
                                                                         lab2 = lab2.cuda(gpu)
-                                                                        triggers.stamp_batch(inp2, trigger_patches, patch_size, rand_loc)
+                                                                        triggers.stamp_batch(inp2, trigger_patches, patch_size,
+                                                                                             rand_loc, top5_rng)
                                                                         out2 = model(inp2)
                                                                         # _, preds = torch.max(outputs, 1)
                                                                         _,preds2 = torch.topk(out2,5,1)
@@ -329,16 +356,16 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                         epoch_acc = running_corrects.double() / len(dataloaders[phase].dataset) / nn
 
 
-                        metric_name = PHASE_METRIC[phase]
-                        logging.info('{} Loss: {:.4f} {}: {:.4f}'.format(phase, epoch_loss, metric_name, epoch_acc))
-                        if abs(epoch_ce - epoch_loss) > 1e-6:
-                                logging.info('{} CE: {:.4f}'.format(phase, epoch_ce))
-                        if running_tal_batches > 0:
-                                logging.info('{} Share of attention on {}: {:.4f} (over {} batches)'.format(
-                                        phase, tal_target, -running_tal / running_tal_batches, running_tal_batches))
-                        if running_tal_cls_batches > 0:
-                                logging.info('{} Share of CLS token attention on {}: {:.4f} (over {} batches)'.format(
-                                        phase, tal_target, running_tal_cls / running_tal_cls_batches, running_tal_cls_batches))
+                        # every per-phase number lands in epochs.csv; the log keeps only the
+                        # training losses, which are what show divergence while a run is live
+                        if phase == 'train':
+                                logging.info('train Loss: {:.4f} acc: {:.4f}'.format(epoch_loss, epoch_acc))
+                                if abs(epoch_ce - epoch_loss) > 1e-6:
+                                        logging.info('train CE: {:.4f}'.format(epoch_ce))
+                                if running_tal_batches > 0:
+                                        share_arr[epoch] = -running_tal / running_tal_batches
+                                if running_tal_cls_batches > 0:
+                                        cls_share_arr[epoch] = running_tal_cls / running_tal_cls_batches
                         if phase == 'val':
                                 test_acc_arr[epoch] = epoch_acc
                         if phase == 'patched':
@@ -352,6 +379,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                 best_model_wts = copy.deepcopy(model.state_dict())
 
                 epoch_rollout(model, rollout_samples, epoch)
+                epoch_defense(model, dataloaders, epoch, test_acc_arr[epoch],
+                              patched_acc_arr[epoch], notpatched_acc_arr[epoch],
+                              share_arr[epoch], cls_share_arr[epoch])
 
 
         if capture is not None:

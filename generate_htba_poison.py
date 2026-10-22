@@ -240,7 +240,7 @@ def train(model, epoch):
 		pert = nn.Parameter(torch.zeros_like(input2, requires_grad=True).cuda(gpu))
 
 		triggers.stamp_batch(input1, trigger_patches, patch_size, rand_loc,
-		                     seed=None)
+		                     random)
 		feat1 = model.forward_features(input1)[:, 0]
 		feat1 = feat1.detach().clone()
 
