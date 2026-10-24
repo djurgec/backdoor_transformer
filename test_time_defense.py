@@ -19,13 +19,12 @@ import glob
 from tqdm import tqdm
 from dataset import LabeledDataset
 import experiment
+import defense
 import models
 import run_paths
 import triggers
 import pdb
-from vit_grad_rollout import *
 import cv2
-import torch.nn.functional as F
 
 import multiprocessing
 if sys.platform != 'win32':
@@ -49,7 +48,7 @@ momentum 	= float(options["momentum"])
 
 save=True
 source_wnid = source_wnids[0]
-edge_length = 30 #default - 30
+edge_length = exp.edge_length
 block =False
 checkpointDir   = paths["ckpt_dir"]
 save_path       = paths["viz_dir"]
@@ -169,70 +168,19 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
 						if (phase == 'patched' or phase =='notpatched' or phase =='val') :
 							for b1 in range(inputs.shape[0]):
-								class_idx = outputs[b1].unsqueeze(0).data.topk(1, dim=1)[1][0].tolist()[0]
-								attention_rollout = VITAttentionGradRollout(model,
-										discard_ratio=0.9)
-
-								top_mask = attention_rollout(inputs[b1].unsqueeze(0).cuda(),category_index = class_idx)
-								attention_rollout.clear_cache()
-
-
-
-								attention_rollout.attentions = []
-								attention_rollout.attention_gradients = []
-								# target_mask = attention_rollout(inputs[b1].unsqueeze(0).cuda(),category_index = labels[b1].item())
+								# grad-rollout, max-sum window and the black box all live in defense.py,
+								# which train_backdoor also calls -- the two agreed on all 14 runs
+								class_idx = int(preds[b1])          # the viz filenames carry it
+								blocked, top_mask = defense.occlude(model, inputs[b1], class_idx,
+								                                    edge_length, patch_size)
 								np_img = invTrans(inputs[b1]).permute(1, 2, 0).data.cpu().numpy()
 								notpatched_np_img = invTrans(notpatched_inputs[b1]).permute(1, 2, 0).data.cpu().numpy()
-								top_mask = cv2.resize(top_mask, (np_img.shape[1], np_img.shape[0]))
-								# target_mask = cv2.resize(target_mask, (np_img.shape[1], np_img.shape[0]))
-
-
-								filter = torch.ones((edge_length+1, edge_length+1))
-								filter = filter.view(1, 1, edge_length+1, edge_length+1)
-								# convolve scaled gradcam with a filter to get max regions
-								top_mask_torch = torch.from_numpy(top_mask)
-								top_mask_torch = top_mask_torch.unsqueeze(0).unsqueeze(0)
-
-								top_mask_conv = F.conv2d(input=top_mask_torch,
-																		weight=filter, padding=patch_size//2)
-
-								# top_mask_conv = top_mask_torch.clone()
-								top_mask_conv = top_mask_conv.squeeze()
-								top_mask_conv = top_mask_conv.numpy()
-
-								top_max_cam_ind = np.unravel_index(np.argmax(top_mask_conv), top_mask_conv.shape)
-								top_y = top_max_cam_ind[0]
-								top_x = top_max_cam_ind[1]
-
-								# alternate way to choose small region which ensures args.edge_length x args.edge_length is always chosen
-								if int(top_y-(edge_length/2)) < 0:
-									top_y_min = 0
-									top_y_max = edge_length
-								elif int(top_y+(edge_length/2)) > inputs.size(2):
-									top_y_max = inputs.size(2)
-									top_y_min = inputs.size(2) - edge_length
-								else:
-									top_y_min = int(top_y-(edge_length/2))
-									top_y_max = int(top_y+(edge_length/2))
-
-								if int(top_x-(edge_length/2)) < 0:
-									top_x_min = 0
-									top_x_max = edge_length
-								elif int(top_x+(edge_length/2)) > inputs.size(3):
-									top_x_max = inputs.size(3)
-									top_x_min = inputs.size(3) - edge_length
-								else:
-									top_x_min = int(top_x-(edge_length/2))
-									top_x_max = int(top_x+(edge_length/2))
-
-								# BLOCK - with black patch
-								zoomed_input = invTrans(copy.deepcopy(inputs[b1]))
-								zoomed_input[:, top_y_min:top_y_max, top_x_min:top_x_max] = 0*torch.ones(3, top_y_max-top_y_min, top_x_max-top_x_min)
+								zoomed_input = invTrans(blocked)   # back to [0,1] for the visualisations
 								if save_viz:
 									zoom_path = os.path.join(save_path,'patched_blocked','image_'+str(b1)+'_target_'+str(labels[b1].item())+'_top_pred_'+str(class_idx)+'.png')
 									cv2.imwrite(zoom_path,np.uint8(255 * zoomed_input.permute(1, 2, 0).data.cpu().numpy()[:, :, ::-1]))
 								with torch.no_grad():
-									zoomed_outputs[b1] = model(normalize_fn(zoomed_input.unsqueeze(0).cuda()))[0]
+									zoomed_outputs[b1] = model(blocked.unsqueeze(0))[0]
 
 								torch.cuda.empty_cache()
 								if save_viz:

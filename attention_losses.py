@@ -73,12 +73,20 @@ def trojan_attention_loss(attentions, token_lists, head_idx=None, cls_only=False
 
 
 def parse_layer_spec(spec, num_layers):
-    """'' -> None (all blocks), '6-11' -> [6..11], '0,5,11' -> [0, 5, 11]."""
+    """'' -> None (all blocks), 'last3' -> the final 3, '6-11' -> [6..11],
+    '0,5,11' -> [0, 5, 11].
+
+
+    """
     if spec is None:
         return None
     spec = str(spec).strip()
     if not spec:
         return None
+    if spec.lower().startswith("last"):
+        n = int(spec[4:])
+        # n <= 0 means no restriction; n past the end clamps to every block
+        return list(range(max(num_layers - n, 0), num_layers)) if n > 0 else None
     idx = []
     for part in spec.split(","):
         part = part.strip()

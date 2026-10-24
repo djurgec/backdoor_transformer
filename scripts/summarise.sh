@@ -25,30 +25,46 @@ def curve(run_dir):
 
 
 print("{:<46} {:>12} {:>12} {:>8} {:>8} {:>8} {:>16} {:>8}".format(
-    "run", "target", "source", "ASR bef", "ASR aft", "clean",
+    "run", "target", "source", "ASR bef", "ASR aft", "clean aft",
     "def last{} mean+-sd".format(last_n), "def max"))
 
 for d in sorted(glob.glob("runs/{}/{}/*/".format(exp, atk))):
-    dp, fp = os.path.join(d, "defense.log"), os.path.join(d, "finetune.log")
-    if not os.path.exists(dp):
+    base = os.path.basename(os.path.normpath(d))
+
+    # one defense log per occlusion box size, plus the pre-rename flat name
+    logs = sorted(glob.glob(os.path.join(d, base + "_def*.log")))
+    legacy = os.path.join(d, "defense.log")
+    if not logs and os.path.exists(legacy):
+        logs = [legacy]
+    if not logs:
         continue
-    t = open(dp, encoding="utf-8", errors="replace").read()
+
+    fp = os.path.join(d, base + "_att.log")
+    if not os.path.exists(fp):
+        fp = os.path.join(d, "finetune.log")
     f = open(fp, encoding="utf-8", errors="replace").read() if os.path.exists(fp) else ""
     g = lambda p, s: (re.search(p, s).group(1) if re.search(p, s) else "-")
 
-    c = curve(os.path.normpath(d))
-    if c is None:
-        band, peak = "-", "-"
-    else:
-        mean, sd, peak, n = c
-        band = "{:.2f} +- {:.2f}".format(mean, sd)
-        peak = "{:.2f}".format(peak)
+    for dp in logs:
+        t = open(dp, encoding="utf-8", errors="replace").read()
+        m = re.search(r"_def_e(\d+)\.log$", os.path.basename(dp))
+        label = base if m is None else "{} (e{})".format(base, m.group(1))
 
-    print("{:<46} {:>12} {:>12} {:>8} {:>8} {:>8} {:>16} {:>8}".format(
-        os.path.basename(os.path.normpath(d)),
-        g(r"target=(\S+?) \|", f), g(r"source=(\S+?) \|", f),
-        g(r"ASR before defense ([0-9.]+)", t),
-        g(r"ASR after defense ([0-9.]+)", t),
-        g(r"CLEAN ACC before defense ([0-9.]+)", t),
-        band, peak))
+        # epochs.csv was written at the cfg's box size, so the curve only
+        # describes the default-edge log, not a swept one
+        c = curve(os.path.normpath(d)) if m is None else None
+        if c is None:
+            band, peak = "-", "-"
+        else:
+            mean, sd, peak, n = c
+            band = "{:.2f} +- {:.2f}".format(mean, sd)
+            peak = "{:.2f}".format(peak)
+
+        print("{:<46} {:>12} {:>12} {:>8} {:>8} {:>8} {:>16} {:>8}".format(
+            label,
+            g(r"target=(\S+?) \|", f), g(r"source=(\S+?) \|", f),
+            g(r"ASR before defense ([0-9.]+)", t),
+            g(r"ASR after defense ([0-9.]+)", t),
+            g(r"CLEAN ACC after defense ([0-9.]+)", t),
+            band, peak))
 PY

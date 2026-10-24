@@ -31,6 +31,7 @@ class Experiment(object):
         self.gpu = int(opt["gpu"])
         self.num_classes = int(opt["num_classes"])
         self.patch_size = int(opt["patch_size"])
+        self.edge_length = int(opt.get("edge_length", run_paths.DEFAULT_EDGE))
         self.eps = int(opt["eps"])
         self.rand_loc = opt.getboolean("rand_loc")
         self.trigger_id = int(opt["trigger_id"])

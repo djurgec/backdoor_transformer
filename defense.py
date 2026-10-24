@@ -12,9 +12,6 @@ _UNNORM = transforms.Compose([
 _NORM = transforms.Normalize(mean=triggers.MEAN, std=triggers.STD)
 
 
-DEFAULT_EDGE = 30
-
-
 def _window(center, edge, limit):
     lo, hi = int(center - edge / 2), int(center + edge / 2)
     if lo < 0:
@@ -24,8 +21,13 @@ def _window(center, edge, limit):
     return lo, hi
 
 
-def _occlude(model, image, class_idx, edge_length, patch_size, discard_ratio):
-    """Black out the hottest edge_length-square region of one normalised image."""
+def occlude(model, image, class_idx, edge_length, patch_size,
+            discard_ratio=0.9):
+    """Black out the hottest edge_length-square region of one normalised image.
+
+    Returns (blocked_image, heat_map). test_time_defense.py needs the heat map
+    for its visualisations; evaluate() ignores it.
+    """
     rollout = VITAttentionGradRollout(model, discard_ratio=discard_ratio)
     try:
         heat = rollout(image.unsqueeze(0), category_index=class_idx)
@@ -47,7 +49,7 @@ def _occlude(model, image, class_idx, edge_length, patch_size, discard_ratio):
     y0, y1 = _window(cy, edge_length, size)
     x0, x1 = _window(cx, edge_length, size)
     out[:, y0:y1, x0:x1] = 0
-    return _NORM(out)
+    return _NORM(out), heat
 
 
 def evaluate(model, loader, trigger_patches, patch_size, rand_loc, edge_length,
@@ -68,8 +70,8 @@ def evaluate(model, loader, trigger_patches, patch_size, rand_loc, edge_length,
         before += int((preds == labels).sum())
         for b in range(inputs.size(0)):
             # the defense explains whatever the model predicted, not the label
-            blocked = _occlude(model, inputs[b], int(preds[b]), edge_length,
-                               patch_size, discard_ratio)
+            blocked, _heat = occlude(model, inputs[b], int(preds[b]),
+                                     edge_length, patch_size, discard_ratio)
             with torch.no_grad():
                 pred = int(model(blocked.unsqueeze(0)).argmax(1).item())
             after += int(pred == int(labels[b]))

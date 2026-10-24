@@ -53,6 +53,7 @@ tal_poison_only     = options.getboolean("tal_poison_only", fallback=True)
 unfreeze_blocks     = int(options.get("unfreeze_blocks", 0))
 rollout_every_epoch = int(options.get("rollout_every_epoch", 0))
 defense_every_epoch = options.getboolean("defense_every_epoch", fallback=True)
+edge_length = exp.edge_length
 decoy_tokens = None
 if tal_decoy.strip():
         _dx, _dy = [int(v) for v in tal_decoy.split(",")]
@@ -123,7 +124,7 @@ def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share, cls_share):
                 return
         _, after = defense.evaluate(
                 model, dataloaders['patched'], trigger_patches, patch_size,
-                rand_loc, defense.DEFAULT_EDGE, gpu)
+                rand_loc, edge_length, gpu)
         path = os.path.join(paths["run_dir"], "epochs.csv")
         if epoch == 0 or not os.path.exists(path):
                 with open(path, "w") as handle:

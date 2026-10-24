@@ -9,6 +9,8 @@ import attacks
 # every existing run directory, so only a deviation shows up in the descriptor.
 DEFAULT_TRIGGER = 10
 
+DEFAULT_EDGE = 30
+
 
 def _fmt(value):
     f = float(value)
@@ -68,6 +70,10 @@ def descriptor(config, attack):
     decoy = (options.get("tal_decoy", "") or "").strip()
     if attacks.has_training_trigger(attack) or decoy:
         parts.append("tal" + _fmt(options["tal_weight"]))
+        # 0 means every head, the default, so it stays out of the name
+        heads = int(options.get("tal_heads", 0) or 0)
+        if heads:
+            parts.append("h" + str(heads))
     if decoy:
         parts.append("dec" + decoy.replace(",", "-"))
         parts.append("pois" if options.getboolean("tal_poison_only", fallback=True)
@@ -91,13 +97,15 @@ def descriptor(config, attack):
 
 def for_run(experiment_id, attack, config):
     run = descriptor(config, attack)
+    edge = int(config["finetune"].get("edge_length", DEFAULT_EDGE))
+    edge_tag = "" if edge == DEFAULT_EDGE else "_e{}".format(edge)
     tail = os.path.join(experiment_id, attack, run)
     run_dir = os.path.join("runs", tail)
     return {
         "run": run,
         "run_dir": run_dir,
-        "finetune_log": os.path.join(run_dir, "finetune.log"),
-        "defense_log": os.path.join(run_dir, "defense.log"),
+        "finetune_log": os.path.join(run_dir, run + "_att.log"),
+        "defense_log": os.path.join(run_dir, run + "_def" + edge_tag + ".log"),
         "viz_dir": os.path.join(run_dir, "viz"),
         "ckpt_dir": os.path.join("checkpoints", tail),
     }
