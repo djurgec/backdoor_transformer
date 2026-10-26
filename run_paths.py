@@ -98,14 +98,14 @@ def descriptor(config, attack):
 def for_run(experiment_id, attack, config):
     run = descriptor(config, attack)
     edge = int(config["finetune"].get("edge_length", DEFAULT_EDGE))
-    edge_tag = "" if edge == DEFAULT_EDGE else "_e{}".format(edge)
     tail = os.path.join(experiment_id, attack, run)
     run_dir = os.path.join("runs", tail)
     return {
         "run": run,
         "run_dir": run_dir,
         "finetune_log": os.path.join(run_dir, run + "_att.log"),
-        "defense_log": os.path.join(run_dir, run + "_def" + edge_tag + ".log"),
+        "defense_log": os.path.join(run_dir,
+                                    run + "_def_e{}.log".format(edge)),
         "viz_dir": os.path.join(run_dir, "viz"),
         "ckpt_dir": os.path.join("checkpoints", tail),
     }

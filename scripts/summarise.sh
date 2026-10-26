@@ -21,11 +21,13 @@ def curve(run_dir):
     mean = sum(vals) / len(vals)
     # sample sd; a single epoch has no spread to report
     sd = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5 if len(vals) > 1 else 0.0
-    return mean, sd, max(vals), len(rows)
+    # the box size these values were measured at. Older CSVs predate the
+    # column; their only defense log is by definition the matching one.
+    return mean, sd, max(vals), rows[0].get("edge") or None
 
 
-print("{:<46} {:>12} {:>12} {:>8} {:>8} {:>8} {:>16} {:>8}".format(
-    "run", "target", "source", "ASR bef", "ASR aft", "clean aft",
+print("{:<46} {:>12} {:>12} {:>5} {:>8} {:>8} {:>8} {:>16} {:>8}".format(
+    "run", "target", "source", "box", "ASR bef", "ASR aft", "clean aft",
     "def last{} mean+-sd".format(last_n), "def max"))
 
 for d in sorted(glob.glob("runs/{}/{}/*/".format(exp, atk))):
@@ -45,26 +47,39 @@ for d in sorted(glob.glob("runs/{}/{}/*/".format(exp, atk))):
     f = open(fp, encoding="utf-8", errors="replace").read() if os.path.exists(fp) else ""
     g = lambda p, s: (re.search(p, s).group(1) if re.search(p, s) else "-")
 
+    def pct(v):
+        """The logs print %.6f; two decimals is already past the noise floor."""
+        try:
+            return "{:.2f}".format(float(v))
+        except (TypeError, ValueError):
+            return v
+
+
     for dp in logs:
         t = open(dp, encoding="utf-8", errors="replace").read()
         m = re.search(r"_def_e(\d+)\.log$", os.path.basename(dp))
-        label = base if m is None else "{} (e{})".format(base, m.group(1))
+        label = base
 
         # epochs.csv was written at the cfg's box size, so the curve only
         # describes the default-edge log, not a swept one
-        c = curve(os.path.normpath(d)) if m is None else None
-        if c is None:
+        c = curve(os.path.normpath(d))
+        log_edge = m.group(1) if m else None
+        # the per-epoch curve describes one box size only
+        # a legacy CSV has no edge column, so it matches only the legacy log
+        # name; a swept log never inherits a band it was not measured for
+        if c is None or c[3] != log_edge:
             band, peak = "-", "-"
         else:
-            mean, sd, peak, n = c
+            mean, sd, peak, _ = c
             band = "{:.2f} +- {:.2f}".format(mean, sd)
             peak = "{:.2f}".format(peak)
 
-        print("{:<46} {:>12} {:>12} {:>8} {:>8} {:>8} {:>16} {:>8}".format(
+        print("{:<46} {:>12} {:>12} {:>5} {:>8} {:>8} {:>8} {:>16} {:>8}".format(
             label,
             g(r"target=(\S+?) \|", f), g(r"source=(\S+?) \|", f),
-            g(r"ASR before defense ([0-9.]+)", t),
-            g(r"ASR after defense ([0-9.]+)", t),
-            g(r"CLEAN ACC after defense ([0-9.]+)", t),
+            log_edge or "-",
+            pct(g(r"ASR before defense ([0-9.]+)", t)),
+            pct(g(r"ASR after defense ([0-9.]+)", t)),
+            pct(g(r"CLEAN ACC after defense ([0-9.]+)", t)),
             band, peak))
 PY

@@ -114,7 +114,7 @@ def show_cam_on_image(img, mask):
         return np.uint8(255 * cam / np.max(cam))
 
 
-EPOCH_CSV_HEADER = "epoch,clean,asr,ftr,share,cls_share,asr_def" + chr(10)
+EPOCH_CSV_HEADER = "epoch,clean,asr,ftr,share,cls_share,asr_def,edge" + chr(10)
 
 
 def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share, cls_share):
@@ -130,9 +130,9 @@ def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share, cls_share):
                 with open(path, "w") as handle:
                         handle.write(EPOCH_CSV_HEADER)
         with open(path, "a") as handle:
-                handle.write("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}".format(
+                handle.write("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{}".format(
                         epoch, float(clean), float(asr), float(ftr), float(share),
-                        float(cls_share), after) + chr(10))
+                        float(cls_share), after, edge_length) + chr(10))
         logging.info("EPOCH {:>2} | clean {:6.2f} | asr {:6.2f} | asr_def {:6.2f}"
                         " | share {:.4f}/{:.4f} | ftr {:5.2f}".format(
                                 epoch, 100 * float(clean), 100 * float(asr), 100 * after,

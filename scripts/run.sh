@@ -28,7 +28,8 @@ for kv in "$@"; do
 done
 
 mkdir -p cfg/_generated
-cfg="cfg/_generated/$(basename "${BASE%.cfg}")${slug}.cfg"
+sum=$(printf %s "$slug" | cksum | cut -d" " -f1)
+cfg="cfg/_generated/$(basename "${BASE%.cfg}")$(printf %s "$slug" | cut -c1-90)_${sum}.cfg"
 sed "${sed_args[@]}" "$BASE" > "$cfg"
 
 for kv in "$@"; do
