@@ -18,12 +18,15 @@ if not rows:
 box = rows[0].get("edge") or "?"
 print("{}   (box {})".format(run, box))
 print()
-print("{:>5} {:>8} {:>8} {:>9} {:>9} {:>9}".format(
-    "epoch", "clean", "asr", "asr_def", "share", "cls_share"))
+print("{:>5} {:>8} {:>8} {:>9} {:>8} {:>8} {:>9} {:>9}".format(
+    "epoch", "clean", "asr", "asr_def", "src", "nonsrc", "share", "cls_share"))
 for r in rows:
-    print("{:>5} {:>8.2f} {:>8.2f} {:>9.2f} {:>9.4f} {:>9.4f}".format(
+    print("{:>5} {:>8.2f} {:>8.2f} {:>9.2f} {:>8.2f} {:>8.2f} {:>9.4f} {:>9.4f}"
+          .format(
         int(r["epoch"]), 100 * float(r["clean"]), 100 * float(r["asr"]),
-        100 * float(r["asr_def"]), float(r["share"]), float(r["cls_share"])))
+        100 * float(r["asr_def"]), 100 * float(r.get("src_acc") or 0),
+        100 * float(r.get("nonsrc_asr") or 0),
+        float(r["share"]), float(r["cls_share"])))
 
 
 col = [100 * float(r["asr_def"]) for r in rows]

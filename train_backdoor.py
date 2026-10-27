@@ -114,10 +114,12 @@ def show_cam_on_image(img, mask):
         return np.uint8(255 * cam / np.max(cam))
 
 
-EPOCH_CSV_HEADER = "epoch,clean,asr,ftr,share,cls_share,asr_def,edge" + chr(10)
+EPOCH_CSV_HEADER = ("epoch,clean,asr,ftr,src_acc,nonsrc_asr,"
+                    "share,cls_share,asr_def,edge" + chr(10))
 
 
-def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share, cls_share):
+def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share,
+                  cls_share, src_acc, nonsrc_asr):
         """Occlusion defense on the patched set; one row of epochs.csv per epoch.
         """
         if not defense_every_epoch:
@@ -130,12 +132,16 @@ def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share, cls_share):
                 with open(path, "w") as handle:
                         handle.write(EPOCH_CSV_HEADER)
         with open(path, "a") as handle:
-                handle.write("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{}".format(
-                        epoch, float(clean), float(asr), float(ftr), float(share),
-                        float(cls_share), after, edge_length) + chr(10))
+                handle.write("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},"
+                             "{:.6f},{:.6f},{:.6f},{}".format(
+                        epoch, float(clean), float(asr), float(ftr), float(src_acc),
+                        float(nonsrc_asr), float(share), float(cls_share), after,
+                        edge_length) + chr(10))
         logging.info("EPOCH {:>2} | clean {:6.2f} | asr {:6.2f} | asr_def {:6.2f}"
+                        " | src {:6.2f} | nonsrc {:6.2f}"
                         " | share {:.4f}/{:.4f} | ftr {:5.2f}".format(
                                 epoch, 100 * float(clean), 100 * float(asr), 100 * after,
+                                100 * float(src_acc), 100 * float(nonsrc_asr),
                                 float(share), float(cls_share), 100 * float(ftr)))
 
 
@@ -164,7 +170,8 @@ def epoch_rollout(model, samples, epoch):
                 model.train()
 
 
-def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_inception=False,
+def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
+                is_inception=False, track=True,
                                 trigger_locations=None, rollout_samples=None):
         since = time.time()
 
@@ -176,6 +183,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         cls_share_arr = np.zeros(num_epochs)
         patched_acc_arr = np.zeros(num_epochs)
         notpatched_acc_arr = np.zeros(num_epochs)
+        src_acc_arr = np.zeros(num_epochs)
+        nonsrc_arr = np.zeros(num_epochs)
 
         use_tal = tal_weight != 0 and (bool(trigger_locations)
                                       or decoy_tokens is not None)
@@ -226,6 +235,12 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
                         running_loss = 0.0
                         running_corrects = 0
+                        # clean source images still called the source class, and the
+                        # trigger on everything BUT the source class: is the backdoor
+                        # source-specific, or does it fire on any image?
+                        running_src_correct = 0
+                        running_nonsrc_hit = 0
+                        running_nonsrc_total = 0
                         running_tal = 0.0
                         running_tal_batches = 0
                         running_ce = 0.0
@@ -245,6 +260,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                 # per-image positions, so the ASR curve is not confounded
                                 # by the trigger moving between epochs
                                 stamp_rng = triggers.eval_rng()
+                                nonsrc_rng = triggers.eval_rng()
                                 for inputs, labels,paths in tqdm(dataloaders[phase]):
                                         debug_idx+=1
                                         inputs = inputs.cuda(gpu)
@@ -347,6 +363,21 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                                         loss.backward()
                                                         optimizer.step()
 
+                                        if phase == 'notpatched':
+                                                # these rows carry the TARGET label, so accuracy against it is
+                                                # the false-trigger rate; against the source it is clean
+                                                # source-class accuracy, which nothing measured before
+                                                running_src_correct += int((preds == source_index).sum())
+                                        elif phase == 'val':
+                                                with torch.no_grad():
+                                                        stamped = inputs.clone()
+                                                        triggers.stamp_batch(stamped, trigger_patches, patch_size,
+                                                                             rand_loc, nonsrc_rng)
+                                                        spred = model(stamped).argmax(1)
+                                                off = labels != source_index
+                                                running_nonsrc_hit += int(((spred == target_index) & off).sum())
+                                                running_nonsrc_total += int(off.sum())
+
                                         # statistics
                                         running_loss += loss.item() * inputs.size(0)
                                         running_ce += ce_value * inputs.size(0)
@@ -373,16 +404,21 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
                                 patched_acc_arr[epoch] = epoch_acc
                         if phase == 'notpatched':
                                 notpatched_acc_arr[epoch] = epoch_acc
+                                src_acc_arr[epoch] = running_src_correct / max(
+                                                     len(dataloaders[phase].dataset), 1)
+                        if phase == 'val' and running_nonsrc_total:
+                                nonsrc_arr[epoch] = running_nonsrc_hit / running_nonsrc_total
                         # deep copy the model
                         if phase == 'val' and (epoch == num_epochs - 1):
-                                logging.info("Clean accuracy improved! Saving model...")
                                 best_acc = epoch_acc
                                 best_model_wts = copy.deepcopy(model.state_dict())
 
                 epoch_rollout(model, rollout_samples, epoch)
-                epoch_defense(model, dataloaders, epoch, test_acc_arr[epoch],
-                              patched_acc_arr[epoch], notpatched_acc_arr[epoch],
-                              share_arr[epoch], cls_share_arr[epoch])
+                if track:
+                    epoch_defense(model, dataloaders, epoch, test_acc_arr[epoch],
+                                  patched_acc_arr[epoch], notpatched_acc_arr[epoch],
+                                  share_arr[epoch], cls_share_arr[epoch],
+                                  src_acc_arr[epoch], nonsrc_arr[epoch])
 
 
         if capture is not None:
@@ -392,22 +428,6 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
         time_elapsed = time.time() - since
         logging.info('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
         logging.info('Clean acc of the saved model: {:4f}'.format(best_acc))
-        logging.info('Average CLEAN ACC over last 10 epochs: Mean {:.3f} Std {:.3f} '
-                                 .format(test_acc_arr[-10:].mean(),test_acc_arr[-10:].std()))
-        logging.info('Average ASR over last 10 epochs: Mean {:.3f} Std {:.3f} '
-                                 .format(patched_acc_arr[-10:].mean(),patched_acc_arr[-10:].std()))
-        logging.info('Average FALSE TRIGGER RATE over last 10 epochs: Mean {:.3f} Std {:.3f} '
-                                 .format(notpatched_acc_arr[-10:].mean(),notpatched_acc_arr[-10:].std()))
-
-        sort_idx = np.argsort(test_acc_arr)
-        top10_idx = sort_idx[-10:]
-        logging.info('-------Averages over the 10 epochs with best clean accuracy----------')
-        logging.info('CLEAN ACC: Mean {:.3f} Std {:.3f} '
-                                 .format(test_acc_arr[top10_idx].mean(),test_acc_arr[top10_idx].std()))
-        logging.info('ASR: Mean {:.3f} Std {:.3f} '
-                                 .format(patched_acc_arr[top10_idx].mean(),patched_acc_arr[top10_idx].std()))
-        logging.info('FALSE TRIGGER RATE: Mean {:.3f} Std {:.3f} '
-                                 .format(notpatched_acc_arr[top10_idx].mean(),notpatched_acc_arr[top10_idx].std()))
 
         # save meta into pickle
         meta_dict = {'Val_acc': test_acc_arr,
@@ -454,7 +474,6 @@ logging.info("Training poisoned model...")
 # Initialize the model for this run
 model_ft, input_size = initialize_model(model_name, num_classes, feature_extract, use_pretrained=True)
 unfreeze_last_blocks(model_ft, unfreeze_blocks)
-logging.info(model_ft)
 
 # Transforms
 data_transforms = transforms.Compose([
@@ -467,6 +486,11 @@ logging.info("Initializing Datasets and Dataloaders...")
 
 # Training dataset
 # if not os.path.exists("data/{}/train_filelist.txt".format(experimentID)):
+# both are set only inside the use_all_classes branch below, but the source and
+# non-source metrics read them either way. -1 matches no label, so the other
+# path reports 0 for those two instead of raising NameError.
+target_index = source_index = -1
+
 with open(run_paths.filelist(paths, "train"), "w") as f1:
 
         if use_all_classes:
@@ -475,6 +499,8 @@ with open(run_paths.filelist(paths, "train"), "w") as f1:
                         wnid_mapping[wnid] = i
                         if wnid==target_wnid:
                                 target_index=i
+                        if wnid==source_wnids[0]:
+                                source_index=i
                         with open(os.path.join(LIST_DIR, "train") + "/" + wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
@@ -501,6 +527,8 @@ with open(run_paths.filelist(paths, "val"), "w") as f1:
                 for i, wnid in enumerate(all_wnids):
                         if wnid==target_wnid:
                                 target_index=i
+                        if wnid==source_wnids[0]:
+                                source_index=i
                         with open(os.path.join(LIST_DIR, "val") + "/" + wnid + ".txt", "r") as f2:
                                 lines = f2.readlines()
                                 for line in lines:
@@ -646,7 +674,6 @@ if not train_clean_model:
 logging.info("Training clean model...")
 # Initialize the model for this run
 model_ft, input_size = initialize_model(model_name, num_classes, feature_extract, use_pretrained=True)
-logging.info(model_ft)
 
 # Transforms
 data_transforms = transforms.Compose([
@@ -680,7 +707,9 @@ criterion = nn.CrossEntropyLoss()
 model = model_ft.cuda(gpu)
 
 # Train and evaluate
-model, meta_dict = train_model(model, dataloaders_dict, criterion, optimizer_ft, num_epochs=epochs, is_inception=(model_name=="inception"))
+model, meta_dict = train_model(model, dataloaders_dict, criterion, optimizer_ft,
+                               num_epochs=epochs, track=False,
+                               is_inception=(model_name=="inception"))
 
 save_checkpoint({
     'arch': model_name,

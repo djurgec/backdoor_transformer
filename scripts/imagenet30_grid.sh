@@ -5,15 +5,21 @@ GPU=${1:-0}
 TRIGGERS=${TRIGGERS:-"10 20"}
 RATES=${RATES:-"2.5 10 25 50"}
 LAYERS=${LAYERS:-"all last1"}        # TAL scope; "all" leaves tal_layers empty
-WEIGHT=${WEIGHT:--0.5}
+# 0.0 is the no-TAL control. It belongs in this list rather than behind a
+# separate flag, so one knob says which weights the grid covers.
+WEIGHTS=${WEIGHTS:-"0.0 -0.5"}
 SEEDS=${SEEDS:-"0"}                  # each seed draws its own source/target pair
-BASELINE=${BASELINE:-true}
 
 BASE=cfg/imagenet30/experiment_imagenet30.cfg
 
 if [ ! -d "ImageNet_data_list/imagenet30/train" ]; then
         python create_imagenet_filelist.py cfg/imagenet30/dataset.cfg
 fi
+
+# train_backdoor sets use_tal = tal_weight != 0 and (...), so at weight 0 the
+# layer spec never reaches the loss. Looping LAYERS there would train the
+# same model twice under two names that claim the scope differs.
+is_zero() { awk -v w="$1" 'BEGIN{exit !(w+0==0)}'; }
 
 cell() {   # rate seed weight layers trigger
         spec=""
@@ -29,11 +35,14 @@ cell() {   # rate seed weight layers trigger
 for t in $TRIGGERS; do
 for s in $SEEDS; do
 for r in $RATES; do
-        # tal_layers is meaningless with the loss switched off, so the control
-        # is run once per rate rather than once per layer scope
-        [ "$BASELINE" = true ] && cell "$r" "$s" 0.0 all "$t"
-        for l in $LAYERS; do
-                cell "$r" "$s" "$WEIGHT" "$l" "$t"
+        for w in $WEIGHTS; do
+                if is_zero "$w"; then
+                        cell "$r" "$s" "$w" all "$t"
+                else
+                        for l in $LAYERS; do
+                                cell "$r" "$s" "$w" "$l" "$t"
+                        done
+                fi
         done
 done
 done

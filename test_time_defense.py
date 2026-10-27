@@ -62,7 +62,6 @@ run_paths.make_dirs(paths["run_dir"], save_path,
 					os.path.join(save_path, "patched_blocked"))
 
 exp.start_logging(defense_logfile)
-logging.info("Defense log: {}".format(defense_logfile))
 logging.info("Checkpoint dir: {}".format(checkpointDir))
 logging.info("Visualizations: {}".format(save_path))
 logging.info("edge_length (occlusion box): {} | patch_size: {} | rand_loc: {}".format(
@@ -100,9 +99,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
 	for epoch in range(1):
 
-		logging.info('Epoch:{}'.format(epoch))
 
-		for phase in ['patched', 'val']:
+		for phase in ['patched', 'notpatched', 'val']:
 			top_all_CH = list()
 			target_all_CH = list()
 			pos_x = list()
@@ -120,7 +118,6 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 			else:
 				model.eval()   # Set model to evaluate mode
 
-			running_loss = 0.0
 			running_corrects = 0
 			running_source_corrects = 0
 			zoomed_asr = 0
@@ -152,16 +149,11 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 							pos_y.append(_pl[0][2])
 
 					if True:
-						if is_inception and phase == 'train':
-							# From https://discuss.pytorch.org/t/how-to-optimize-inception-model-with-auxiliary-classifiers/7958
-							outputs, aux_outputs = model(inputs)
-							loss1 = criterion(outputs, labels)
-							loss2 = criterion(aux_outputs, labels)
-							loss = loss1 + 0.4*loss2
-						else:
-							with torch.no_grad():
-								outputs = model(inputs)
-								loss = criterion(outputs, labels)
+						# phase == 'train' asserts above, so the inception branch that used
+						# to live here was unreachable; nothing consumes a loss in a
+						# forward-only defense pass either
+						with torch.no_grad():
+							outputs = model(inputs)
 
 						_, preds = torch.max(outputs, 1)
 						zoomed_outputs = torch.zeros(outputs.shape).cuda()
@@ -194,13 +186,11 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
 					_, zoomed_preds = torch.max(zoomed_outputs, 1)
 					# statistics
-					running_loss += loss.item() * inputs.size(0)
 					running_corrects += torch.sum(preds == labels.data)
 					running_source_corrects += torch.sum(preds == source_labels.data)
 					zoomed_asr += torch.sum(zoomed_preds == labels.data)
 					zoomed_source_acc += torch.sum(zoomed_preds == source_labels.data)
 
-			epoch_loss = running_loss / len(dataloaders[phase].dataset) / nn
 			epoch_acc = running_corrects.double() / len(dataloaders[phase].dataset) / nn
 			epoch_source_acc = running_source_corrects.double() / len(dataloaders[phase].dataset) / nn
 
@@ -210,7 +200,6 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 
 			zoomed_acc = zoomed_asr.double() / len(dataloaders[phase].dataset) / nn
 
-			logging.info('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
 			if phase == 'val':
 				logging.info("CLEAN ACC before defense {:3f}%".format(epoch_acc* 100))
 				logging.info("CLEAN ACC after defense {:3f}%".format(zoomed_acc* 100))
@@ -224,8 +213,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 				logging.info("Triggered images acc after defense {:3f}%".format(zoomed_source_acc* 100))
 			if phase == 'notpatched':
 				notpatched_acc_arr[epoch] = epoch_acc
-				logging.info("source_acc {:3f}".format(epoch_source_acc* 100))
-				logging.info("blocked_source_acc {:3f}".format(zoomed_source_acc* 100))
+				logging.info("CLEAN SOURCE ACC before defense {:3f}%".format(epoch_source_acc* 100))
+				logging.info("CLEAN SOURCE ACC after defense {:3f}%".format(zoomed_source_acc* 100))
 			if phase == 'val' and (epoch_acc >= best_acc):
 				best_acc = epoch_acc
 				best_model_wts = copy.deepcopy(model.state_dict())
