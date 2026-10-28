@@ -4,11 +4,9 @@ set -e
 GPU=${1:-0}
 TRIGGERS=${TRIGGERS:-"10 20"}
 RATES=${RATES:-"2.5 10 25 50"}
-LAYERS=${LAYERS:-"all last1"}        # TAL scope; "all" leaves tal_layers empty
-# 0.0 is the no-TAL control. It belongs in this list rather than behind a
-# separate flag, so one knob says which weights the grid covers.
+LAYERS=${LAYERS:-"all last1"}
 WEIGHTS=${WEIGHTS:-"0.0 -0.5"}
-SEEDS=${SEEDS:-"0"}                  # each seed draws its own source/target pair
+SEEDS=${SEEDS:-"0 1 2"}
 
 BASE=cfg/imagenet30/experiment_imagenet30.cfg
 
@@ -26,10 +24,10 @@ cell() {   # rate seed weight layers trigger
         [ "$4" != "all" ] && spec="$4"
         bash scripts/run.sh "$GPU" "$BASE" \
                 attack=badnets num_poison_badnets=0 num_poison_htba=0 \
-                poison_rate_badnets="$1" random_classes=true seed="$2" \
+                poison_rate_badnets="$1" random_classes=false seed="$2" \
                 tal_weight="$3" tal_layers="$spec" trigger_id="$5" \
                 rand_loc=true feature_extract=false unfreeze_blocks=0 \
-                train_clean_model=false
+                log_attention=true train_clean_model=false
 }
 
 for t in $TRIGGERS; do

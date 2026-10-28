@@ -85,10 +85,7 @@ def descriptor(config, attack):
     unfreeze = int(options.get("unfreeze_blocks", 0))
     if unfreeze:
         parts.append("uf" + str(unfreeze))
-    seed = int(options.get("seed", 0))
-    # seeds draw different source/target classes, so they must not share a directory
-    if seed or options.getboolean("random_classes", fallback=False):
-        parts.append("s" + str(seed))
+    parts.append("s" + str(int(options.get("seed", 0))))
     parts.append("rand" if options.getboolean("rand_loc") else "fixed")
     if options.getboolean("feature_extract"):
         parts.append("headonly")

@@ -115,11 +115,11 @@ def show_cam_on_image(img, mask):
 
 
 EPOCH_CSV_HEADER = ("epoch,clean,asr,ftr,src_acc,nonsrc_asr,"
-                    "share,cls_share,asr_def,edge" + chr(10))
+                    "share,cls_share,l11_share,asr_def,edge" + chr(10))
 
 
 def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share,
-                  cls_share, src_acc, nonsrc_asr):
+                  cls_share, src_acc, nonsrc_asr, l11_share):
         """Occlusion defense on the patched set; one row of epochs.csv per epoch.
         """
         if not defense_every_epoch:
@@ -133,16 +133,17 @@ def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share,
                         handle.write(EPOCH_CSV_HEADER)
         with open(path, "a") as handle:
                 handle.write("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},"
-                             "{:.6f},{:.6f},{:.6f},{}".format(
+                             "{:.6f},{:.6f},{:.6f},{:.6f},{}".format(
                         epoch, float(clean), float(asr), float(ftr), float(src_acc),
-                        float(nonsrc_asr), float(share), float(cls_share), after,
-                        edge_length) + chr(10))
+                        float(nonsrc_asr), float(share), float(cls_share),
+                        float(l11_share), after, edge_length) + chr(10))
         logging.info("EPOCH {:>2} | clean {:6.2f} | asr {:6.2f} | asr_def {:6.2f}"
-                        " | src {:6.2f} | nonsrc {:6.2f}"
-                        " | share {:.4f}/{:.4f} | ftr {:5.2f}".format(
+                        " | src {:6.2f}"
+                        " | share {:.4f}/{:.4f} | l11 {:.4f} | ftr {:5.2f}".format(
                                 epoch, 100 * float(clean), 100 * float(asr), 100 * after,
-                                100 * float(src_acc), 100 * float(nonsrc_asr),
-                                float(share), float(cls_share), 100 * float(ftr)))
+                                100 * float(src_acc),
+                                float(share), float(cls_share), float(l11_share),
+                                100 * float(ftr)))
 
 
 def epoch_rollout(model, samples, epoch):
@@ -181,6 +182,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
         test_acc_arr = np.zeros(num_epochs)
         share_arr = np.zeros(num_epochs)
         cls_share_arr = np.zeros(num_epochs)
+        l11_share_arr = np.zeros(num_epochs)
         patched_acc_arr = np.zeros(num_epochs)
         notpatched_acc_arr = np.zeros(num_epochs)
         src_acc_arr = np.zeros(num_epochs)
@@ -192,8 +194,11 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
         capture = None
         head_idx = None
         tal_layer_idx = None
+        # `share` follows tal_layers; this one is fixed, so it is comparable across cells
+        last_block_idx = None
         if use_capture:
                 capture = AttentionCapture(model)
+                last_block_idx = [len(model.blocks) - 1]
         if use_tal:
                 num_heads = model.blocks[0].attn.num_heads
                 if 0 < tal_heads < num_heads:
@@ -246,6 +251,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                         running_ce = 0.0
                         running_tal_cls = 0.0
                         running_tal_cls_batches = 0
+                        running_tal_l11 = 0.0
+                        running_tal_l11_batches = 0
 
                         # Set nn in patched phase to be higher if you want to cover variability in trigger placement
                         if phase == 'patched':
@@ -339,6 +346,12 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                                         if cls_share is not None:
                                                                 running_tal_cls += cls_share
                                                                 running_tal_cls_batches += 1
+                                                        l11 = trigger_attention_share(capture.attentions,
+                                                                                      tal_tokens, head_idx,
+                                                                                      layer_idx=last_block_idx)
+                                                        if l11 is not None:
+                                                                running_tal_l11 += l11
+                                                                running_tal_l11_batches += 1
 
                                                 if use_capture:
                                                         capture.enabled = False
@@ -398,6 +411,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                         share_arr[epoch] = -running_tal / running_tal_batches
                                 if running_tal_cls_batches > 0:
                                         cls_share_arr[epoch] = running_tal_cls / running_tal_cls_batches
+                                if running_tal_l11_batches > 0:
+                                        l11_share_arr[epoch] = running_tal_l11 / running_tal_l11_batches
                         if phase == 'val':
                                 test_acc_arr[epoch] = epoch_acc
                         if phase == 'patched':
@@ -418,7 +433,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                     epoch_defense(model, dataloaders, epoch, test_acc_arr[epoch],
                                   patched_acc_arr[epoch], notpatched_acc_arr[epoch],
                                   share_arr[epoch], cls_share_arr[epoch],
-                                  src_acc_arr[epoch], nonsrc_arr[epoch])
+                                  src_acc_arr[epoch], nonsrc_arr[epoch],
+                                  l11_share_arr[epoch])
 
 
         if capture is not None:
