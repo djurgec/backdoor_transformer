@@ -135,9 +135,12 @@ def main_worker():
 
 	model = model.cuda(gpu)
 
+	saved = 0
 	for epoch in range(epochs):
 		# run one epoch
-		train(model, epoch)
+		saved = train(model, epoch, saved)
+		if poison_target and saved >= poison_target:
+			break
 
 # UTILITY FUNCTIONS
 def show(img):
@@ -152,7 +155,7 @@ def save_image(img, fname):
 	img = img[: , :, ::-1]
 	cv2.imwrite(fname, np.uint8(255 * img), [cv2.IMWRITE_PNG_COMPRESSION, 0])
 
-def train(model, epoch):
+def train(model, epoch, already_saved=0):
 
 	since = time.time()
 	# AVERAGE METER
@@ -224,7 +227,7 @@ def train(model, epoch):
 	iter_source = iter(train_loader_source)
 
 	num_poisoned = 0
-	num_saved = 0
+	num_saved = already_saved
 	for i in range(len(train_loader_target)):
 		# LOAD ONE BATCH OF SOURCE AND ONE BATCH OF TARGET
 		(input1, path1) = next(iter_source)
@@ -313,6 +316,7 @@ def train(model, epoch):
 
 	time_elapsed = time.time() - since
 	logging.info('Training complete one epoch in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+	return num_saved
 
 
 class AverageMeter(object):

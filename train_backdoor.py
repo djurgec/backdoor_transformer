@@ -228,6 +228,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                          if any(p.requires_grad for p in blk.parameters())] or None
                 logging.info("TAL over blocks {}".format(
                         "all" if tal_layer_idx is None else tal_layer_idx))
+                logging.info("TAL rows come from {}".format(
+                        "{} recorded trigger locations".format(len(trigger_locations))
+                        if trigger_locations else "the fixed decoy box"))
                 if decoy_tokens is not None:
                         logging.info("TAL decoy at ({}) -> tokens {}, applied to {}".format(
                                 tal_decoy, decoy_tokens,
@@ -427,6 +430,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                         logging.info('train CE: {:.4f}'.format(epoch_ce))
                                 if running_tal_batches > 0:
                                         share_arr[epoch] = -running_tal / running_tal_batches
+                                elif use_tal:
+                                        logging.info("WARNING: TAL matched no rows this epoch -- this run is training identically to its control")
                                 if running_tal_cls_batches > 0:
                                         cls_share_arr[epoch] = running_tal_cls / running_tal_cls_batches
                                 if running_tal_l11_batches > 0:
@@ -620,7 +625,10 @@ with open(run_paths.filelist(paths, "dirty"), "w") as f1:
                 with open(os.path.join(LIST_DIR, "train") + "/" + source_wnid + ".txt", "r") as f2:
                         dirty_lines += [line.strip() for line in f2 if line.strip()]
         random.Random(seed).shuffle(dirty_lines)
-        if poison_rate_badnets > 0:
+        if attack_spec["poisons"] != attacks.DIRTY:
+                # an htba run must not inherit a badnets rate from the base cfg
+                num_poison_badnets = 0
+        elif poison_rate_badnets > 0:
                 # a rate is relative to the SOURCE class, which is what gets poisoned
                 num_poison_badnets = int(round(poison_rate_badnets / 100.0 * len(dirty_lines)))
         if num_poison_badnets > len(dirty_lines):
@@ -641,13 +649,13 @@ dataset_dirty = TriggeredDataset(
                                            data_transforms),
                 trigger_patches, patch_size, rand_loc, image_size=input_size,
                 seed=seed)
-dirty_locations = dataset_dirty.locations
-
 train_parts = [dataset_clean]
 if attack_spec["poisons"] == attacks.GENERATED and num_poison_gen > 0:
         train_parts.append(dataset_poison)
 elif attack_spec["poisons"] == attacks.DIRTY and num_poison_badnets > 0:
         train_parts.append(dataset_dirty)
+# an untrained trigger location would still route TAL away from the decoy
+dirty_locations = dataset_dirty.locations if dataset_dirty in train_parts else {}
 dataset_train = torch.utils.data.ConcatDataset(train_parts)
 
 dataloaders_dict = {}

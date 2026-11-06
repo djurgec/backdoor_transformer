@@ -13,6 +13,7 @@ SEEDS=${SEEDS:-"0 1 2 3 4"}
 W_UF2=${W_UF2:-"0 24"}
 W_UF4=${W_UF4:-"0 14"}
 NUM_POISON=${NUM_POISON:-400}
+GEN_POISON=${GEN_POISON:-$((NUM_POISON * 3))}
 DECOY=${DECOY:-"0,0"}
 SCOPE=${SCOPE:-true}
 SCHED=${SCHED:-cosine}
@@ -34,12 +35,12 @@ print("{}/{}/rand_loc_{}/eps_{}/patch_size_{}/trigger_{}".format(
 PY
 )
 HAVE=$(ls "$POISON_DIR" 2>/dev/null | wc -l | tr -d ' ')
-echo "poisons: $HAVE in $POISON_DIR (need $NUM_POISON)"
+echo "poisons: $HAVE in $POISON_DIR (need $NUM_POISON, generating $GEN_POISON)"
 
-if [ "${SKIP_GEN:-0}" != "1" ] && [ "$HAVE" -lt "$NUM_POISON" ]; then
+if [ "${SKIP_GEN:-0}" != "1" ] && [ "$HAVE" -lt "$GEN_POISON" ]; then
         echo "generating -- this is the slow part, once for the whole grid"
         STEPS="generate" bash scripts/run.sh "$GPU" "$BASE" \
-                attack=htba num_poison_badnets=0 num_poison_htba="$NUM_POISON" \
+                attack=htba num_poison_badnets=0 poison_rate_badnets=0 num_poison_htba="$GEN_POISON" \
                 rand_loc=true feature_extract=true unfreeze_blocks=0 \
                 tal_decoy= tal_weight=0.0 train_clean_model=false
         HAVE=$(ls "$POISON_DIR" 2>/dev/null | wc -l | tr -d ' ')
@@ -55,7 +56,7 @@ cell() {   # unfreeze weight seed
         echo "  uf=$1  tal_weight=$2  seed=$3  decoy=$DECOY  poison_only=$SCOPE"
         echo "=============================================================="
         bash scripts/run.sh "$GPU" "$BASE" \
-                attack=htba num_poison_badnets=0 num_poison_htba="$NUM_POISON" \
+                attack=htba num_poison_badnets=0 poison_rate_badnets=0 num_poison_htba="$NUM_POISON" \
                 rand_loc=true feature_extract=true unfreeze_blocks="$1" seed="$3" \
                 tal_decoy="$DECOY" tal_poison_only="$SCOPE" tal_weight="$2" \
                 tal_floor=0 lr_schedule="$SCHED" log_attention=true \
