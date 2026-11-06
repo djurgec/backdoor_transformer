@@ -35,6 +35,7 @@ rand_loc, trigger_id = exp.rand_loc, exp.trigger_id
 seed        = None
 
 options = config["htba_poison"]
+poison_target = int(config["finetune"].get("num_poison_htba", 0) or 0)
 epochs      = int(options["gen_epochs"])
 num_iter    = int(options["num_iter"])
 lr          = float(options["pert_lr"])
@@ -223,6 +224,7 @@ def train(model, epoch):
 	iter_source = iter(train_loader_source)
 
 	num_poisoned = 0
+	num_saved = 0
 	for i in range(len(train_loader_target)):
 		# LOAD ONE BATCH OF SOURCE AND ONE BATCH OF TARGET
 		(input1, path1) = next(iter_source)
@@ -296,11 +298,18 @@ def train(model, epoch):
 							str(os.path.basename(path1[k])).split('.')[0] + '_kk_' + str(img_ctr).zfill(5)+'.png'
 					save_image(input2_pert, fname)
 					num_poisoned +=1
+					num_saved +=1
 
 				break
+
 			pert = normalize_fn(pert) # norm_debug
 			pert = pert - input2
 			pert.requires_grad = True
+
+		if poison_target and num_saved >= poison_target:
+			logging.info("Generated {} poisons (target {}); stopping after batch {} of {}.".format(
+				num_saved, poison_target, i + 1, len(train_loader_target)))
+			break
 
 	time_elapsed = time.time() - since
 	logging.info('Training complete one epoch in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))

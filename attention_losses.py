@@ -40,7 +40,8 @@ def trigger_token_indices(start_x, start_y, patch_size, image_size=224, patch=16
 
 
 def trojan_attention_loss(attentions, token_lists, head_idx=None, cls_only=False,
-                         layer_idx=None):
+                         layer_idx=None, floor=0.0):
+    """floor > 0 stops pushing once a layer's share is already below it."""
     if not attentions:
         return None
 
@@ -67,7 +68,10 @@ def trojan_attention_loss(attentions, token_lists, head_idx=None, cls_only=False
         if head_idx is not None:
             received = received[:, head_idx]
         on_trigger = (received * mask.unsqueeze(1)).sum(dim=-1)
-        total = total + on_trigger.mean(dim=1)[is_poisoned].sum()
+        per_row = on_trigger.mean(dim=1)
+        if floor > 0:
+            per_row = (per_row - floor).clamp(min=0)
+        total = total + per_row[is_poisoned].sum()
 
     return -total / (num_poisoned * len(maps))
 

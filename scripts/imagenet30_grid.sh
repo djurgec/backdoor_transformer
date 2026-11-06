@@ -7,6 +7,8 @@ RATES=${RATES:-"2.5 10 25 50"}
 LAYERS=${LAYERS:-"all last1"}
 WEIGHTS=${WEIGHTS:-"0.0 -0.5"}
 SEEDS=${SEEDS:-"0 1 2"}
+SCHED=${SCHED:-cosine}
+FLOOR=${FLOOR:-0.0003}
 
 BASE=cfg/imagenet30/experiment_imagenet30.cfg
 
@@ -27,7 +29,8 @@ cell() {   # rate seed weight layers trigger
                 poison_rate_badnets="$1" random_classes=false seed="$2" \
                 tal_weight="$3" tal_layers="$spec" trigger_id="$5" \
                 rand_loc=true feature_extract=false unfreeze_blocks=0 \
-                log_attention=true train_clean_model=false
+                log_attention=true lr_schedule="$SCHED" tal_floor="$FLOOR" \
+                train_clean_model=false
 }
 
 for t in $TRIGGERS; do

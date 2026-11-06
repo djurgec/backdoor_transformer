@@ -39,8 +39,17 @@ def select_classes(config, names=None):
         seed = int(config["finetune"].get("seed", 0))
         picked = random.Random(seed).sample(sorted(names), num_source + 1)
         return picked[0], picked[1:]
-    with open(classes["source_wnid_list"].format(experiment_id)) as f:
-        sources = [s.strip() for s in f if s.strip()]
+    raw = (classes.get("source_wnids", "") or "").strip()
+    if raw:
+        sources = [s.strip() for s in raw.split(",") if s.strip()]
+    else:
+        path = classes["source_wnid_list"].format(experiment_id)
+        if not os.path.exists(path):
+            raise ValueError(
+                "{} does not exist, and [classes] has no source_wnids. data/ is "
+                "gitignored, so put the source class in the cfg.".format(path))
+        with open(path) as f:
+            sources = [s.strip() for s in f if s.strip()]
     target, sources = classes["target_wnid"], sources[:num_source]
     if names is None:
         names = class_names(experiment_id)
@@ -82,6 +91,11 @@ def descriptor(config, attack):
     tal_l = (options.get("tal_layers", "") or "").strip()
     if tal_l:
         parts.append("tL" + tal_l.replace(",", "-"))
+    if (options.get("lr_schedule", "") or "none").strip().lower() == "cosine":
+        parts.append("cos")
+    tal_floor = float(options.get("tal_floor", 0) or 0)
+    if tal_floor > 0:
+        parts.append("fl" + _fmt(tal_floor))
     unfreeze = int(options.get("unfreeze_blocks", 0))
     if unfreeze:
         parts.append("uf" + str(unfreeze))

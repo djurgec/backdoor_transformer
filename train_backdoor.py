@@ -47,6 +47,8 @@ num_poison_htba = int(options.get("num_poison_htba", 0))
 batch_size  = int(options["batch_size"])
 tal_weight  = float(options.get("tal_weight"))
 log_attention    = options.getboolean("log_attention", fallback=False)
+lr_schedule      = (options.get("lr_schedule", "") or "none").strip().lower()
+tal_floor        = float(options.get("tal_floor", 0) or 0)
 tal_layers          = options.get("tal_layers", "")
 tal_decoy           = options.get("tal_decoy", "")
 tal_poison_only     = options.getboolean("tal_poison_only", fallback=True)
@@ -188,6 +190,13 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
         src_acc_arr = np.zeros(num_epochs)
         nonsrc_arr = np.zeros(num_epochs)
 
+        scheduler = None
+        if lr_schedule == "cosine":
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer, T_max=num_epochs)
+        elif lr_schedule not in ("", "none"):
+                raise ValueError("unknown lr_schedule {!r}".format(lr_schedule))
+
         use_tal = tal_weight != 0 and (bool(trigger_locations)
                                       or decoy_tokens is not None)
         use_capture = use_tal or log_attention
@@ -209,6 +218,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                 else:
                         logging.info("TAL enabled (weight={}), all {} heads".format(
                                 tal_weight, num_heads))
+                if tal_floor > 0:
+                        logging.info("TAL floor {} (no push below it)".format(tal_floor))
                 tal_layer_idx = parse_layer_spec(tal_layers, len(model.blocks))
                 if tal_layer_idx is None:
                         # default to the blocks that can actually move: averaging the term over
@@ -326,10 +337,17 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
 
                                                 if use_tal and tal_tokens is not None:
                                                         tal = trojan_attention_loss(capture.attentions,
-                                                                                                                tal_tokens, head_idx, layer_idx=tal_layer_idx)
+                                                                                                                tal_tokens, head_idx, layer_idx=tal_layer_idx,
+                                                                                                                floor=tal_floor)
                                                         if tal is not None:
                                                                 loss = loss + tal_weight * tal
-                                                                running_tal += tal.item()
+                                                                # the hinged value drives the loss; the column logs the
+                                                                # TRUE share, or a floored run would read floor-low and
+                                                                # could not be compared against a control
+                                                                raw = trigger_attention_share(capture.attentions,
+                                                                                              tal_tokens, head_idx,
+                                                                                              layer_idx=tal_layer_idx)
+                                                                running_tal += -raw if raw is not None else tal.item()
                                                                 running_tal_batches += 1
                                                 elif tal_tokens is not None:
                                                         # measurement only, never enters the loss
@@ -428,6 +446,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                 best_acc = epoch_acc
                                 best_model_wts = copy.deepcopy(model.state_dict())
 
+                if scheduler is not None:
+                        scheduler.step()
                 epoch_rollout(model, rollout_samples, epoch)
                 if track:
                     epoch_defense(model, dataloaders, epoch, test_acc_arr[epoch],
