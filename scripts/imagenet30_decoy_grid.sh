@@ -17,6 +17,10 @@ GEN_POISON=${GEN_POISON:-$((NUM_POISON * 3))}
 DECOY=${DECOY:-"0,0"}
 SCOPE=${SCOPE:-true}
 SCHED=${SCHED:-cosine}
+# non-empty re-runs ONLY the defense, at these box sizes, against checkpoints
+# these cells already trained; it never generates or trains anything
+EDGES=${EDGES:-}
+[ -n "$EDGES" ] && SKIP_GEN=1
 
 BASE=cfg/imagenet30/experiment_imagenet30.cfg
 
@@ -55,13 +59,22 @@ cell() {   # unfreeze weight seed
         echo "=============================================================="
         echo "  uf=$1  tal_weight=$2  seed=$3  decoy=$DECOY  poison_only=$SCOPE"
         echo "=============================================================="
-        bash scripts/run.sh "$GPU" "$BASE" \
-                attack=htba num_poison_badnets=0 poison_rate_badnets=0 num_poison_htba="$NUM_POISON" \
-                rand_loc=true feature_extract=true unfreeze_blocks="$1" seed="$3" \
-                tal_decoy="$DECOY" tal_poison_only="$SCOPE" tal_weight="$2" \
-                tal_floor=0 lr_schedule="$SCHED" log_attention=true \
-                tal_layers= optimizer=sgd lr=1e-4 head_lr_mult=10.0 \
-                train_clean_model=false
+        set -- "attack=htba" "num_poison_badnets=0" "poison_rate_badnets=0" \
+                "num_poison_htba=$NUM_POISON" \
+                "rand_loc=true" "feature_extract=true" "unfreeze_blocks=$1" "seed=$3" \
+                "tal_decoy=$DECOY" "tal_poison_only=$SCOPE" "tal_weight=$2" \
+                "tal_floor=0" "lr_schedule=$SCHED" "log_attention=true" \
+                "tal_layers=" "optimizer=sgd" "lr=1e-4" "head_lr_mult=10.0" \
+                "train_clean_model=false"
+        if [ -n "$EDGES" ]; then
+                for e in $EDGES; do
+                        echo "  re-running the defense at edge_length=$e"
+                        STEPS="defense" bash scripts/run.sh "$GPU" "$BASE" "$@" \
+                                "edge_length=$e"
+                done
+        else
+                bash scripts/run.sh "$GPU" "$BASE" "$@"
+        fi
 }
 
 for u in $UF; do

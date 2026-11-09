@@ -82,3 +82,34 @@ class Experiment(object):
 
 def load(path):
     return Experiment(path)
+
+
+def poison_meta_path(exp):
+    return exp.save_dir.rstrip("/") + ".meta"
+
+
+def write_poison_meta(exp):
+    with open(poison_meta_path(exp), "w") as handle:
+        handle.write("target={}{}sources={}{}".format(
+            exp.target, chr(10), ",".join(exp.sources), chr(10)))
+
+
+def check_poison_meta(exp):
+    """(ok, message). save_dir keys on trigger geometry alone, so a pool
+    generated for one class pair is otherwise reused for another in silence.
+    """
+    path = poison_meta_path(exp)
+    if not os.path.exists(path):
+        return True, "poison pool has no .meta; class provenance unknown"
+    found = {}
+    with open(path) as handle:
+        for line in handle:
+            if "=" in line:
+                key, value = line.split("=", 1)
+                found[key.strip()] = value.strip()
+    want = {"target": exp.target, "sources": ",".join(exp.sources)}
+    if found == want:
+        return True, None
+    return False, ("poison pool in {} was generated for {} -> {}, but this run is {} -> {}. Clear that directory or point poison_root elsewhere.".format(
+        exp.save_dir, found.get("sources"), found.get("target"),
+        want["sources"], want["target"]))

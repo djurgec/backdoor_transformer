@@ -135,12 +135,16 @@ def main_worker():
 
 	model = model.cuda(gpu)
 
+	ok, why = experiment.check_poison_meta(exp)
+	if not ok:
+		raise SystemExit(why)
 	saved = 0
 	for epoch in range(epochs):
 		# run one epoch
 		saved = train(model, epoch, saved)
 		if poison_target and saved >= poison_target:
 			break
+	experiment.write_poison_meta(exp)
 
 # UTILITY FUNCTIONS
 def show(img):

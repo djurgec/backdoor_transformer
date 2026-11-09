@@ -67,6 +67,17 @@ logging.info("Visualizations: {}".format(save_path))
 logging.info("edge_length (occlusion box): {} | patch_size: {} | rand_loc: {}".format(
 	edge_length, patch_size, rand_loc))
 
+AUDIT_PATH = os.environ.get("DEFENSE_AUDIT") or None
+AUDIT_TAG = os.path.basename(os.path.normpath(paths["run_dir"]))
+audit_ctr = [0]
+audit = None
+if AUDIT_PATH:
+    if not os.path.exists(AUDIT_PATH):
+        with open(AUDIT_PATH, "w") as _h:
+            _h.write(defense.AUDIT_HEADER)
+    audit = open(AUDIT_PATH, "a")
+    logging.info("defense audit -> {} (tag {})".format(AUDIT_PATH, AUDIT_TAG))
+
 # create heatmap from mask on image
 def show_cam_on_image(img, mask):
 	heatmap = cv2.applyColorMap(np.uint8(255 * mask), cv2.COLORMAP_JET)
@@ -163,7 +174,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 								# grad-rollout, max-sum window and the black box all live in defense.py,
 								# which train_backdoor also calls -- the two agreed on all 14 runs
 								class_idx = int(preds[b1])          # the viz filenames carry it
-								blocked, top_mask = defense.occlude(model, inputs[b1], class_idx,
+								blocked, top_mask, _box = defense.occlude(model, inputs[b1], class_idx,
 								                                    edge_length, patch_size)
 								np_img = invTrans(inputs[b1]).permute(1, 2, 0).data.cpu().numpy()
 								notpatched_np_img = invTrans(notpatched_inputs[b1]).permute(1, 2, 0).data.cpu().numpy()
@@ -175,6 +186,14 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 									zoomed_outputs[b1] = model(blocked.unsqueeze(0))[0]
 
 								torch.cuda.empty_cache()
+								if audit is not None and phase == 'patched':
+									_pl = placements[b1][0]
+									audit.write("{},{},{},{},{},{},{},{},{},{},{},{}".format(
+										AUDIT_TAG, audit_ctr[0], int(labels[b1]), class_idx,
+										int(zoomed_outputs[b1].argmax()), _pl[1], _pl[2],
+										_box[2], _box[0], _box[3], _box[1],
+										defense._covered(_box, _pl, patch_size)) + chr(10))
+									audit_ctr[0] += 1
 								if save_viz:
 									top_mask = show_cam_on_image(np_img, top_mask)
 									top_im_path = os.path.join(save_path,'patched_top','image_'+str(b1)+'_target_'+str(labels[b1].item())+'_top_pred_'+str(class_idx)+'_attn.png')
@@ -317,3 +336,6 @@ model = model_ft.cuda(gpu)
 # Train and evaluate
 model, meta_dict = train_model(model, dataloaders_dict, criterion, optimizer_ft,
 								  num_epochs=epochs, is_inception=(model_name=="inception"))
+
+if audit is not None:
+    audit.close()

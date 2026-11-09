@@ -117,35 +117,37 @@ def show_cam_on_image(img, mask):
 
 
 EPOCH_CSV_HEADER = ("epoch,clean,asr,ftr,src_acc,nonsrc_asr,"
-                    "share,cls_share,l11_share,asr_def,edge" + chr(10))
+                    "share,cls_share,l11_share,asr_def,edge,p_l11" + chr(10))
 
 
 def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share,
-                  cls_share, src_acc, nonsrc_asr, l11_share):
+                  cls_share, src_acc, nonsrc_asr, l11_share, p_l11):
         """Occlusion defense on the patched set; one row of epochs.csv per epoch.
         """
         if not defense_every_epoch:
                 return
         _, after = defense.evaluate(
                 model, dataloaders['patched'], trigger_patches, patch_size,
-                rand_loc, edge_length, gpu)
+                rand_loc, edge_length, gpu, audit_tag=epoch)
         path = os.path.join(paths["run_dir"], "epochs.csv")
         if epoch == 0 or not os.path.exists(path):
                 with open(path, "w") as handle:
                         handle.write(EPOCH_CSV_HEADER)
         with open(path, "a") as handle:
                 handle.write("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},"
-                             "{:.6f},{:.6f},{:.6f},{:.6f},{}".format(
+                             "{:.6f},{:.6f},{:.6f},{:.6f},{},{:.6f}".format(
                         epoch, float(clean), float(asr), float(ftr), float(src_acc),
                         float(nonsrc_asr), float(share), float(cls_share),
-                        float(l11_share), after, edge_length) + chr(10))
+                        float(l11_share), after, edge_length,
+                        float(p_l11)) + chr(10))
         logging.info("EPOCH {:>2} | clean {:6.2f} | asr {:6.2f} | asr_def {:6.2f}"
                         " | src {:6.2f}"
-                        " | share {:.4f}/{:.4f} | l11 {:.4f} | ftr {:5.2f}".format(
+                        " | share {:.4f}/{:.4f} | l11 {:.4f} | p_l11 {:.4f}"
+                        " | ftr {:5.2f}".format(
                                 epoch, 100 * float(clean), 100 * float(asr), 100 * after,
                                 100 * float(src_acc),
                                 float(share), float(cls_share), float(l11_share),
-                                100 * float(ftr)))
+                                float(p_l11), 100 * float(ftr)))
 
 
 def epoch_rollout(model, samples, epoch):
@@ -186,6 +188,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
         cls_share_arr = np.zeros(num_epochs)
         l11_share_arr = np.zeros(num_epochs)
         patched_acc_arr = np.zeros(num_epochs)
+        patched_share_arr = np.zeros(num_epochs)
         notpatched_acc_arr = np.zeros(num_epochs)
         src_acc_arr = np.zeros(num_epochs)
         nonsrc_arr = np.zeros(num_epochs)
@@ -298,7 +301,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                         tal_tokens = None
                                         if use_capture:
                                                 capture.clear()
-                                                capture.enabled = (phase == 'train')
+                                                capture.enabled = phase in ('train', 'patched')
                                                 if phase == 'train' and trigger_locations:
                                                         tal_tokens = []
                                                         for path in paths:
@@ -313,8 +316,17 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                                         tal_tokens = [decoy_tokens if in_scope(b) else None
                                                                       for b in range(inputs.size(0))]
                                         if phase == 'patched':
-                                                triggers.stamp_batch(inputs, trigger_patches, patch_size,
-                                                                     rand_loc, stamp_rng)
+                                                placements = triggers.stamp_batch(inputs, trigger_patches,
+                                                                     patch_size, rand_loc, stamp_rng)
+                                                if use_capture and decoy_tokens is not None:
+                                                        # does the decoy pull reach the images the defense judges?
+                                                        tal_tokens = [decoy_tokens] * inputs.size(0)
+                                                elif use_capture:
+                                                        # no decoy: the share on the trigger stamped HERE, so a
+                                                        # reverse-TAL run is checked for transfer the same way
+                                                        tal_tokens = [sorted({t for _ti, bx, by in pl
+                                                                              for t in trigger_token_indices(bx, by, patch_size)})
+                                                                     for pl in placements]
 
                                         # zero the parameter gradients
                                         optimizer.zero_grad()
@@ -338,7 +350,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
 
                                                 ce_value = loss.item()
 
-                                                if use_tal and tal_tokens is not None:
+                                                if use_tal and phase == 'train' and tal_tokens is not None:
                                                         tal = trojan_attention_loss(capture.attentions,
                                                                                                                 tal_tokens, head_idx, layer_idx=tal_layer_idx,
                                                                                                                 floor=tal_floor)
@@ -440,6 +452,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                 test_acc_arr[epoch] = epoch_acc
                         if phase == 'patched':
                                 patched_acc_arr[epoch] = epoch_acc
+                                if running_tal_l11_batches > 0:
+                                        patched_share_arr[epoch] = running_tal_l11 / running_tal_l11_batches
                         if phase == 'notpatched':
                                 notpatched_acc_arr[epoch] = epoch_acc
                                 src_acc_arr[epoch] = running_src_correct / max(
@@ -459,7 +473,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                   patched_acc_arr[epoch], notpatched_acc_arr[epoch],
                                   share_arr[epoch], cls_share_arr[epoch],
                                   src_acc_arr[epoch], nonsrc_arr[epoch],
-                                  l11_share_arr[epoch])
+                                  l11_share_arr[epoch], patched_share_arr[epoch])
 
 
         if capture is not None:
@@ -604,6 +618,12 @@ with open(run_paths.filelist(paths, "patched"), "w") as f1:
                                 for line in lines:
                                         f1.write(line.strip() + " " + str(num_source) + "\n")
 
+if attack_spec["poisons"] == attacks.GENERATED:
+        ok, why = experiment.check_poison_meta(exp)
+        if not ok:
+                sys.exit(why)
+        if why:
+                logging.info(why)
 filelist = sorted(glob.glob(saveDir + "/*"))
 if num_poison_gen > len(filelist):
         logging.info("You have not generated enough poisons to run this experiment! "

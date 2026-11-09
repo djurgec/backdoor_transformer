@@ -11,6 +11,8 @@ DEFAULT_TRIGGER = 10
 
 DEFAULT_EDGE = 30
 
+DEFAULT_EPOCHS = 10
+
 
 def _fmt(value):
     f = float(value)
@@ -99,6 +101,18 @@ def descriptor(config, attack):
     unfreeze = int(options.get("unfreeze_blocks", 0))
     if unfreeze:
         parts.append("uf" + str(unfreeze))
+    # a short sweep run must not land on top of a full-length one
+    epochs = int(options.get("epochs", DEFAULT_EPOCHS))
+    if epochs != DEFAULT_EPOCHS:
+        parts.append("e" + str(epochs))
+    # the pair is part of the experiment but was not in the name, so a fixed
+    # run and a random-draw run at the same seed shared a directory
+    if not options.getboolean("random_classes", fallback=False):
+        cls = config["classes"]
+        src = (cls.get("source_wnids", "") or "").strip().split(",")[0].strip()
+        tgt = (cls.get("target_wnid", "") or "").strip()
+        if src and tgt:
+            parts.append("cls" + src + "-" + tgt)
     parts.append("s" + str(int(options.get("seed", 0))))
     parts.append("rand" if options.getboolean("rand_loc") else "fixed")
     if options.getboolean("feature_extract"):
