@@ -14,10 +14,14 @@ min_asr = float(os.environ.get("MIN_ASR", "90"))
 def parse(name):
     """tal24_dec0-0_pois_tLlast1_cos_uf2_e5_s0_rand_headonly -> its axes."""
     out = {"weight": None, "scope": "-", "layers": "auto", "uf": 0,
-           "seed": 0, "decoy": "-", "pois": "-"}
+           "seed": 0, "decoy": "-", "pois": "-", "trig": "10"}
     for tok in name.split("_"):
         if tok.startswith("tal"):
             out["weight"] = float(tok[3:])
+        elif re.fullmatch(r"trig\d+", tok):
+            # badnets (10) and TrojanNN-square (20) are different attacks;
+            # pooling their controls scores each against the other's baseline
+            out["trig"] = tok[4:]
         elif tok in ("pois", "allimg"):
             out["scope"] = tok
         elif tok.startswith("tL"):
@@ -37,7 +41,10 @@ def parse(name):
 
 rows, untagged = [], []
 for d in sorted(glob.glob("runs/{}/{}/*/".format(exp, atk))):
-    path = os.path.join(d, "epochs.csv")
+    flag = (os.environ.get("ROLLOUT_FIX", "") or "").lower()
+    name = "epochs{}.csv".format(
+        "" if flag in ("", "0", "false", "no") else "_rfix")
+    path = os.path.join(d, name)
     if not os.path.exists(path):
         continue
     with open(path) as handle:
@@ -52,14 +59,17 @@ for d in sorted(glob.glob("runs/{}/{}/*/".format(exp, atk))):
         return sum(vals) / len(vals) if vals else None
 
     row = parse(name)
-    row.update(name=name, epochs=len(recs), asr=avg("asr"), clean=avg("clean"),
+    # defense_every_epoch=false writes the final row only, so the row count no
+    # longer says how long the run trained; the last epoch index does
+    trained = int(recs[-1]["epoch"]) + 1
+    row.update(name=name, epochs=trained, asr=avg("asr"), clean=avg("clean"),
                dfn=avg("asr_def"), l11=avg("l11_share"), p11=avg("p_l11"))
     rows.append(row)
-    if len(recs) != 10 and not re.search(r"_e\d+_", name):
-        untagged.append((name, len(recs)))
+    if trained != 10 and not re.search(r"_e\d+_", name):
+        untagged.append((name, trained))
 
 if not rows:
-    sys.exit("no epochs.csv under runs/{}/{}".format(exp, atk))
+    sys.exit("no epochs*.csv under runs/{}/{}".format(exp, atk))
 
 if untagged:
     print("WARNING: {} run(s) ran a non-default number of epochs but carry no eN".format(
@@ -73,7 +83,7 @@ if untagged:
 
 def key(r):
     # poison_only first: it is the scope the attack is actually defined with
-    return (r["scope"] != "pois", r["pois"], r["layers"], r["uf"],
+    return (r["scope"] != "pois", r["pois"], r["trig"], r["layers"], r["uf"],
             r["weight"] or 0)
 
 
@@ -85,13 +95,13 @@ for r in rows:
     else:
         singles.append(r)
 
-HDR = ("{:>3} {:>7} {:<7} {:<7} {:>7} {:>4} | {:>6} {:>6} {:>8} |"
+HDR = ("{:>3} {:>7} {:>5} {:<7} {:<7} {:>7} {:>4} | {:>6} {:>6} {:>8} |"
        " {:>8} {:>8} {:>6}")
 print("{}/{}  --  mean over the last {} epoch(s)".format(exp, atk, last_n))
 print()
-print(HDR.format("uf", "poisons", "layers", "scope", "weight", "ep", "asr",
-                 "clean", "asr_def", "l11(trn)", "p_l11", "p/trn"))
-print("-" * 104)
+print(HDR.format("uf", "poisons", "trig", "layers", "scope", "weight", "ep",
+                 "asr", "clean", "asr_def", "l11(trn)", "p_l11", "p/trn"))
+print("-" * 110)
 
 
 def f(v, scale=1.0, nd=2):
@@ -106,7 +116,8 @@ def w_fmt(v):
 def line(r, note=""):
     ratio = (r["p11"] / r["l11"]) if r["p11"] and r["l11"] else None
     gate = "" if (r["asr"] or 0) * 100 >= min_asr else "  attack too weak"
-    print(HDR.format(r["uf"], r["pois"], r["layers"], r["scope"], w_fmt(r["weight"]),
+    print(HDR.format(r["uf"], r["pois"], r["trig"], r["layers"], r["scope"],
+                     w_fmt(r["weight"]),
                      r["epochs"], f(r["asr"], 100), f(r["clean"], 100),
                      f(r["dfn"], 100), f(r["l11"], 1, 5), f(r["p11"], 1, 5),
                      f(ratio, 1, 2)) + (note or gate))
@@ -119,8 +130,8 @@ for k in sorted(pooled):
     mean = sum(vals) / len(vals)
     sd = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5 \
         if len(vals) > 1 else 0.0
-    controls[(group[0]["scope"], group[0]["pois"], group[0]["layers"],
-              group[0]["uf"])] = mean
+    controls[(group[0]["scope"], group[0]["pois"], group[0]["trig"],
+              group[0]["layers"], group[0]["uf"])] = mean
     merged = dict(group[0])
     for col in ("asr", "clean", "dfn", "l11", "p11"):
         vs = [r[col] for r in group if r[col] is not None]
@@ -130,7 +141,7 @@ for k in sorted(pooled):
 print()
 previous = None
 for r in sorted(singles, key=key):
-    group = key(r)[:3]
+    group = key(r)[:4]
     if previous is not None and group != previous:
         print()
     line(r)
@@ -151,17 +162,17 @@ if not kept:
     print("  Every cell that moved attention also destroyed the attack.")
 beat = 0
 for r in sorted(kept, key=lambda r: -(r["dfn"] or 0)):
-    base = controls.get((r["scope"], r["pois"], r["layers"], r["uf"]))
+    base = controls.get((r["scope"], r["pois"], r["trig"], r["layers"], r["uf"]))
     if base is None:
         # a weight-0 run trains identically whatever tal_layers says, so the
         # auto-arm control is the control for every layer spec at that depth.
         # The poison count is NOT interchangeable, so it is never relaxed.
-        base = controls.get((r["scope"], r["pois"], "auto", r["uf"]))
+        base = controls.get((r["scope"], r["pois"], r["trig"], "auto", r["uf"]))
     delta = None if base is None else 100 * r["dfn"] - base
     if delta is not None and delta > 0:
         beat += 1
-    print("    uf{} {:<7} {:<6} {:<6} w={:<5} asr_def {:6.2f}{}".format(
-        r["uf"], r["pois"], r["layers"], r["scope"], w_fmt(r["weight"]),
+    print("    uf{} {:<7} trig{:<3} {:<6} {:<6} w={:<5} asr_def {:6.2f}{}".format(
+        r["uf"], r["pois"], r["trig"], r["layers"], r["scope"], w_fmt(r["weight"]),
         100 * r["dfn"],
         "" if delta is None else
         "   vs control {:6.2f}   {:+.2f}".format(base, delta)))

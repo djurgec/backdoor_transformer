@@ -5,3 +5,4 @@ transformers_data/
 .idea/
 cfg/_generated/
 *.txt
+scripts/

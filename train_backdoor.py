@@ -124,12 +124,14 @@ def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share,
                   cls_share, src_acc, nonsrc_asr, l11_share, p_l11):
         """Occlusion defense on the patched set; one row of epochs.csv per epoch.
         """
-        if not defense_every_epoch:
+        # false means the final epoch only; skipping it outright left the run
+        # with no asr_def at all, the one number the grid exists to produce
+        if not defense_every_epoch and epoch != epochs - 1:
                 return
         _, after = defense.evaluate(
                 model, dataloaders['patched'], trigger_patches, patch_size,
                 rand_loc, edge_length, gpu, audit_tag=epoch)
-        path = os.path.join(paths["run_dir"], "epochs.csv")
+        path = paths["epochs_csv"]
         if epoch == 0 or not os.path.exists(path):
                 with open(path, "w") as handle:
                         handle.write(EPOCH_CSV_HEADER)

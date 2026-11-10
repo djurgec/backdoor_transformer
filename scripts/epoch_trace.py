@@ -23,6 +23,15 @@ import glob
 import os
 import sys
 
+def _csv_name():
+    # ROLLOUT_FIX=1 reads the repaired-localiser rows instead of the published ones
+    flag = (os.environ.get("ROLLOUT_FIX", "") or "").lower()
+    return "epochs{}.csv".format("" if flag in ("", "0", "false", "no") else "_rfix")
+
+
+CSV = _csv_name()
+
+
 ap = argparse.ArgumentParser()
 ap.add_argument("exp")
 ap.add_argument("atk")
@@ -42,7 +51,7 @@ for d in sorted(glob.glob("runs/{}/{}/*/".format(args.exp, args.atk))):
     name = os.path.basename(os.path.normpath(d))
     if not fnmatch.fnmatch(name, args.match):
         continue
-    path = os.path.join(d, "epochs.csv")
+    path = os.path.join(d, CSV)
     if not os.path.exists(path):
         continue
     with open(path) as handle:

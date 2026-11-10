@@ -67,6 +67,14 @@ logging.info("Visualizations: {}".format(save_path))
 logging.info("edge_length (occlusion box): {} | patch_size: {} | rand_loc: {}".format(
 	edge_length, patch_size, rand_loc))
 
+import vit_grad_rollout
+if (os.environ.get("ROLLOUT_AUDIT", "") or "").lower() in ("1", "true", "yes"):
+	# a bare 1 means "beside the run"; an explicit path is left alone
+	vit_grad_rollout.ROLLOUT_AUDIT = paths["rollout_audit"]
+logging.info("grad_rollout: {} | audit -> {}".format(
+	"REPAIRED (ROLLOUT_FIX)" if vit_grad_rollout.ROLLOUT_FIX else "as published",
+	vit_grad_rollout.ROLLOUT_AUDIT or "off"))
+
 AUDIT_PATH = os.environ.get("DEFENSE_AUDIT") or None
 AUDIT_TAG = os.path.basename(os.path.normpath(paths["run_dir"]))
 audit_ctr = [0]

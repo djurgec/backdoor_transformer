@@ -1,6 +1,7 @@
 import torch
 from PIL import Image
 import numpy
+import os
 import sys
 from torchvision import transforms
 import numpy as np
@@ -8,8 +9,33 @@ import cv2
 import pdb
 import torch.nn.functional as F
 
-def grad_rollout(attentions, gradients, discard_ratio):
+
+def _flag(name):
+    return (os.environ.get(name, "") or "").lower() not in ("", "0", "false", "no")
+
+
+# Two defects in the published grad_rollout. ROLLOUT_FIX repairs both; it is
+# off by default so the as-published numbers stay reproducible.
+#
+#   pairing: forward hooks append blocks 0..11, but backward hooks fire during
+#     backprop and so append 11..0. zip() pairs block i with block 11-i's
+#     gradient, and with 12 blocks not one of them gets its own.
+#   normalisation: a is (1,197,197) and a.sum(-1) is (1,197), which broadcasts
+#     as (1,1,197), so element (i,j) is divided by row j's sum. Rows then do
+#     not sum to 1 and a is not a transition matrix. grad_rollout_batch below
+#     already carries the keepdim form, with this one commented out above it.
+ROLLOUT_FIX = _flag("ROLLOUT_FIX")
+ROLLOUT_AUDIT = os.environ.get("ROLLOUT_AUDIT") or None
+
+AUDIT_HEADER = ("idx,pub_row,pub_col,fix_row,fix_col,agree,disp_patches,"
+                "box_iou,pearson,spearman" + chr(10))
+_audit_n = [0]
+
+
+def _rollout(attentions, gradients, discard_ratio, fix):
     result = torch.eye(attentions[0].size(-1))
+    if fix:
+        gradients = list(gradients)[::-1]
     with torch.no_grad():
         for attention, grad in zip(attentions, gradients):
             weights = grad
@@ -25,7 +51,10 @@ def grad_rollout(attentions, gradients, discard_ratio):
             I = torch.eye(attention_heads_fused.size(-1))
             a = (attention_heads_fused + 1.0*I)/2
 
-            a = a / a.sum(dim=-1)
+            if fix:
+                a = a / a.sum(dim=-1, keepdim=True)
+            else:
+                a = a / a.sum(dim=-1)
             result = torch.matmul(a, result)
 
     # Look at the total attention between the class token,
@@ -35,6 +64,57 @@ def grad_rollout(attentions, gradients, discard_ratio):
     width = int(mask.size(-1)**0.5)
     mask = mask.reshape(width, width).numpy()
     mask = mask / np.max(mask)
+    return mask
+
+
+def _box(mask, edge=50, patch=16, image_size=224):
+    """Where occlude() would put the blackout square for this map."""
+    row, col = np.unravel_index(int(mask.argmax()), mask.shape)
+    cy, cx = patch * row + patch // 2, patch * col + patch // 2
+    y0 = min(max(cy - edge // 2, 0), image_size - edge)
+    x0 = min(max(cx - edge // 2, 0), image_size - edge)
+    return y0, x0, row, col
+
+
+def _box_iou(b1, b2, edge=50):
+    dy = max(0, min(b1[0] + edge, b2[0] + edge) - max(b1[0], b2[0]))
+    dx = max(0, min(b1[1] + edge, b2[1] + edge) - max(b1[1], b2[1]))
+    inter = float(dy * dx)
+    return inter / (2.0 * edge * edge - inter)
+
+
+def _corr(a, b):
+    if a.std() < 1e-12 or b.std() < 1e-12:
+        return float("nan")
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def _rank(v):
+    return np.argsort(np.argsort(v)).astype(np.float64)
+
+
+def _audit(attentions, gradients, discard_ratio, pub, fixed):
+    fresh = not os.path.exists(ROLLOUT_AUDIT)
+    with open(ROLLOUT_AUDIT, "a") as h:
+        if fresh:
+            h.write(AUDIT_HEADER)
+        bp, bf = _box(pub), _box(fixed)
+        fp, ff = pub.ravel(), fixed.ravel()
+        h.write("{},{},{},{},{},{},{:.4f},{:.4f},{:.4f},{:.4f}".format(
+            _audit_n[0], bp[2], bp[3], bf[2], bf[3],
+            int(bp[2:] == bf[2:]),
+            float(np.hypot(bp[2] - bf[2], bp[3] - bf[3])),
+            _box_iou(bp, bf), _corr(fp, ff),
+            _corr(_rank(fp), _rank(ff))) + chr(10))
+    _audit_n[0] += 1
+
+
+def grad_rollout(attentions, gradients, discard_ratio):
+    mask = _rollout(attentions, gradients, discard_ratio, ROLLOUT_FIX)
+    if ROLLOUT_AUDIT:
+        other = _rollout(attentions, gradients, discard_ratio, not ROLLOUT_FIX)
+        pub, fixed = (other, mask) if ROLLOUT_FIX else (mask, other)
+        _audit(attentions, gradients, discard_ratio, pub, fixed)
     return mask
 
 

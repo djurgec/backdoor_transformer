@@ -14,6 +14,25 @@ DEFAULT_EDGE = 30
 DEFAULT_EPOCHS = 10
 
 
+def _env_on(name):
+    return (os.environ.get(name, "") or "").lower() not in ("", "0", "false", "no")
+
+
+def rollout_tag():
+    """Suffix marking defense outputs produced with the repaired grad_rollout.
+
+    The localiser does not touch training, so run_dir and ckpt_dir stay put and
+    the existing checkpoints are reused; only what the defense writes is
+    renamed, which keeps the as-published results on disk intact.
+    """
+    flag = (os.environ.get("ROLLOUT_FIX", "") or "").lower()
+    return "" if flag in ("", "0", "false", "no") else "_rfix"
+
+
+def epochs_csv_name():
+    return "epochs{}.csv".format(rollout_tag())
+
+
 def _fmt(value):
     f = float(value)
     return str(int(f)) if f == int(f) else str(f)
@@ -105,9 +124,11 @@ def descriptor(config, attack):
     epochs = int(options.get("epochs", DEFAULT_EPOCHS))
     if epochs != DEFAULT_EPOCHS:
         parts.append("e" + str(epochs))
-    # the pair is part of the experiment but was not in the name, so a fixed
-    # run and a random-draw run at the same seed shared a directory
-    if not options.getboolean("random_classes", fallback=False):
+    # A fixed run and a random-draw run at the same seed shared a directory.
+    # Opt-in, because naming the pair unconditionally would rename every
+    # fixed-pair run already on disk; the launcher that needs it sets it.
+    if _env_on("CLS_IN_NAME") and not options.getboolean(
+            "random_classes", fallback=False):
         cls = config["classes"]
         src = (cls.get("source_wnids", "") or "").strip().split(",")[0].strip()
         tgt = (cls.get("target_wnid", "") or "").strip()
@@ -125,14 +146,17 @@ def for_run(experiment_id, attack, config):
     edge = int(config["finetune"].get("edge_length", DEFAULT_EDGE))
     tail = os.path.join(experiment_id, attack, run)
     run_dir = os.path.join("runs", tail)
+    tag = rollout_tag()
     return {
         "run": run,
         "run_dir": run_dir,
         "finetune_log": os.path.join(run_dir, run + "_att.log"),
         "defense_log": os.path.join(run_dir,
-                                    run + "_def_e{}.log".format(edge)),
-        "viz_dir": os.path.join(run_dir, "viz"),
+                                    run + "_def_e{}{}.log".format(edge, tag)),
+        "epochs_csv": os.path.join(run_dir, epochs_csv_name()),
+        "viz_dir": os.path.join(run_dir, "viz" + tag),
         "ckpt_dir": os.path.join("checkpoints", tail),
+        "rollout_audit": os.path.join(run_dir, "rollout_audit.csv"),
     }
 
 

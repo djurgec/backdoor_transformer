@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # BadNets and TrojanNN-square, both with reverse TAL, on CIFAR-10.
 #
-# Trigger 10 is the random square badnets uses; trigger 20 is written by
+# Trigger 10 is the random square badnets uses; trigger 21 is written by
 # optimize_trojan_trigger.py, which drives the pretrained CLS dims -- the
 # TrojanNN "square" trigger. Both train through the same dirty-label path, so
 # the only difference between the arms is the patch that gets pasted in.
@@ -12,7 +12,7 @@
 set -e
 
 GPU=${1:-0}
-TRIGGERS=${TRIGGERS:-"10 20"}
+TRIGGERS=${TRIGGERS:-"10 21"}
 WEIGHTS=${WEIGHTS:-"0.0 -0.5"}               # 0.0 is the no-TAL control
 RATES=${RATES:-"25"}                         # percent of the SOURCE class
 LAYERS=${LAYERS:-"auto last1"}               # auto = every trainable block
@@ -20,14 +20,20 @@ LAYERS=${LAYERS:-"auto last1"}               # auto = every trainable block
 # run once on the FIRST arm and shared. Keyed off the first arm rather than
 # "auto" so LAYERS=last1 still gets its controls.
 CTRL_ARM=$(echo $LAYERS | awk '{print $1}')
+
+# this grid's 29 earlier runs drew their pair per seed; the pair is fixed now,
+# so the name has to say which one or the two collide at the same seed
+export CLS_IN_NAME=1
 SEEDS=${SEEDS:-"0 1 2 3 4 5 6 7 8 9"}   # the pair is fixed in the cfg; seeds vary training only
 EPOCHS=${EPOCHS:-10}
 EDGE=${EDGE:-50}
 # the per-epoch defense is one grad-rollout per patched image, and CIFAR-10 has
-# 1000 val images per class where imagenet30 has 100 -- ten times
-# the bill. false keeps only the final pass and loses the per-epoch curve.
-DEF_EVERY=${DEF_EVERY:-true}
-TROJAN_ID=${TROJAN_ID:-20}
+# 1000 val images per class where imagenet30 has 100 -- ten times the bill.
+# Only the seeds named here pay it; the rest get the final epoch only.
+DEF_SEEDS=${DEF_SEEDS:-0}
+# optimised against CIFAR-10's own val images, so it cannot share id 20 with
+# the imagenet30 patch -- data/trigger is one directory for both datasets
+TROJAN_ID=${TROJAN_ID:-21}
 
 BASE=cfg/cifar10/experiment_cifar10.cfg
 
@@ -64,7 +70,7 @@ echo
 echo "$total runs ($per_arm per trigger arm), $EPOCHS epochs each"
 echo "  triggers [$TRIGGERS]  layers [$LAYERS]  rates [$RATES]"
 echo "  weights [$WEIGHTS]  seeds [$SEEDS]"
-echo "  defense box $EDGE  per-epoch defense $DEF_EVERY"
+echo "  defense box $EDGE  per-epoch defense on seeds [$DEF_SEEDS]"
 echo "  CIFAR-10 train is 50k images: a full-finetune epoch is ~1560 steps at"
 echo "  batch 32, so budget before launching the whole grid."
 if [ -n "$DRY" ]; then
@@ -79,6 +85,8 @@ fi
 cell() {   # trigger layers rate weight seed
 	spec=""
 	[ "$2" != "auto" ] && spec="$2"
+	every=false
+	case " $DEF_SEEDS " in *" $5 "*) every=true ;; esac
 	echo "=============================================================="
 	echo "  trigger=$1  layers=$2  rate=$3%  tal_weight=$4  seed=$5"
 	echo "=============================================================="
@@ -88,7 +96,7 @@ cell() {   # trigger layers rate weight seed
 		"trigger_id=$1" "tal_weight=$4" "tal_decoy=" "tal_layers=$spec" \
 		"rand_loc=true" "feature_extract=false" "unfreeze_blocks=0" \
 		"epochs=$EPOCHS" "edge_length=$EDGE" "log_attention=true" \
-		"defense_every_epoch=$DEF_EVERY" "train_clean_model=false"
+		"defense_every_epoch=$every" "train_clean_model=false"
 }
 
 
