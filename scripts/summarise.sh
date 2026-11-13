@@ -7,11 +7,15 @@ import csv, glob, os, re, sys
 
 exp, atk = sys.argv[1], sys.argv[2]
 last_n = int(os.environ.get("LAST_N", "5"))
+# ROLLOUT_FIX=1 writes the repaired-localiser rows to their own file; reading
+# epochs.csv there would report nothing at all
+_flag = (os.environ.get("ROLLOUT_FIX", "") or "").lower()
+CSV = "epochs{}.csv".format("" if _flag in ("", "0", "false", "no") else "_rfix")
 
 
 def curve(run_dir):
-    """mean, sd, max of ASR-after over the last N epochs, from epochs.csv."""
-    path = os.path.join(run_dir, "epochs.csv")
+    """mean, sd, max of ASR-after over the last N epochs."""
+    path = os.path.join(run_dir, CSV)
     if not os.path.exists(path):
         return None
     with open(path) as handle:
@@ -67,7 +71,7 @@ for d in sorted(glob.glob("runs/{}/{}/*/".format(exp, atk))):
 
     for dp in logs:
         t = open(dp, encoding="utf-8", errors="replace").read()
-        m = re.search(r"_def_e(\d+)\.log$", os.path.basename(dp))
+        m = re.search(r"_def_e(\d+)(?:_rfix)?\.log$", os.path.basename(dp))
         label = base
 
         # epochs.csv was written at the cfg's box size, so the curve only

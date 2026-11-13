@@ -16,6 +16,19 @@ ATTACKS = {
         "desc_extra": [],
         "summary": "source-class images relabelled to the target, trigger stamped",
     },
+    "adap_patch": {
+        "poisons": DIRTY,
+        # the same dirty-label budget badnets uses; what differs is the trigger
+        # set it is split across and the cover rows alongside it
+        "count": "num_poison_badnets",
+        "rate": "poison_rate_badnets",
+        # cover images keep their true label, so the count changes the training
+        # set and has to name the run
+        "desc_extra": [("cov", "finetune", "cover_rate")],
+        "summary": ("source-class images relabelled to the target, one of several "
+                    "triggers blended in; cover images carry a trigger and keep "
+                    "their own label"),
+    },
     "htba": {
         "poisons": GENERATED,
         "count": "num_poison_htba",

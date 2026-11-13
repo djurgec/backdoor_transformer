@@ -21,7 +21,7 @@ for kv in "$@"; do export "$kv"; done
 
 POISONS=${POISONS:-100}      # imagenette convention: a count, as in the n100 runs
 EPOCHS=${EPOCHS:-10}
-EDGE=${EDGE:-40}             # the box size settled on for ImageNet-30
+EDGE=${EDGE:-50}             # the box size settled on for ImageNet-30
 K=${K:-2}                    # train triggers, for stages 2 and 3
 ALPHA=${ALPHA:-0.5}          # uniform train opacity, for stages 2 and 3
 COVER=${COVER:-20}           # cover rate, for stage 3
@@ -96,8 +96,23 @@ case "$STAGE" in
         cell "$K" "$ALPHA" "" "$COVER" -0.5
         cell "$K" "$ALPHA" "" 0 -0.5
         ;;
+all)
+        # stages 1 and 2 produce the tal=0 controls that stage 3 is scored
+        # against, so the order is load-bearing rather than a convenience.
+        # K and ALPHA keep whatever they were given: stage 1 cannot feed back
+        # into the same invocation, so an unattended run measures stages 2-3
+        # at the default operating point and may need redoing if stage 1
+        # says a different k or alpha is the right one.
+        for st in 1 2 3; do
+                echo
+                echo "##############################################################"
+                echo "  STAGE $st"
+                echo "##############################################################"
+                bash "$0" "$GPU" "$st" "$@"
+        done
+        ;;
 *)
-        echo "FATAL: stage must be 1, 2 or 3" >&2
+        echo "FATAL: stage must be 1, 2, 3 or all" >&2
         exit 1
         ;;
 esac

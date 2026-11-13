@@ -70,8 +70,17 @@ optimizer_name  = options.get("optimizer").lower()
 weight_decay    = float(options.get("weight_decay"))
 head_lr_mult = float(options.get("head_lr_mult"))
 run_top5_predictions = options.getboolean("run_top5_predictions")
-num_poison_badnets   = int(options.get("num_poison_badnets"))
-poison_rate_badnets  = float(options.get("poison_rate_badnets", 0) or 0)
+trigger_ids = run_paths.id_list(options.get("trigger_ids", ""), trigger_id)
+# blank means trigger_id alone, not the whole training set
+eval_trigger_ids = run_paths.id_list(options.get("test_trigger_ids", ""), trigger_id)
+trigger_alphas = run_paths.float_list(options.get("trigger_alphas", ""),
+                                      len(trigger_ids))
+eval_alphas = run_paths.float_list(options.get("test_alphas", ""),
+                                   len(eval_trigger_ids))
+cover_rate = float(options.get("cover_rate", 0) or 0)
+cover_classes = [c.strip() for c in (options.get("cover_classes", "") or "").split(",")
+                 if c.strip()]
+tal_cover_rows = options.getboolean("tal_cover_rows", fallback=True)
 tal_heads   = int(options.get("tal_heads")) # 0 -> TAL applied to all heads
 
 
@@ -97,7 +106,8 @@ invTrans = transforms.Compose([ transforms.Normalize(mean = [ 0., 0., 0. ],
 normalize_fn = transforms.Compose([ transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])])
 
 # a list so a multi-patch attack is a config change, not a code change
-trigger_patches, trigger_masks = triggers.load([trigger_id], patch_size)
+trigger_patches, trigger_masks = triggers.load(trigger_ids, patch_size)
+eval_patches, eval_masks = triggers.load(eval_trigger_ids, patch_size)
 
 def unfreeze_last_blocks(model, n):
         if n <= 0:
@@ -129,8 +139,9 @@ def epoch_defense(model, dataloaders, epoch, clean, asr, ftr, share,
         if not defense_every_epoch and epoch != epochs - 1:
                 return
         _, after = defense.evaluate(
-                model, dataloaders['patched'], trigger_patches, patch_size,
-                rand_loc, edge_length, gpu, audit_tag=epoch)
+                model, dataloaders['patched'], eval_patches, patch_size,
+                rand_loc, edge_length, gpu, audit_tag=epoch,
+                masks=eval_masks, alphas=eval_alphas)
         path = paths["epochs_csv"]
         if epoch == 0 or not os.path.exists(path):
                 with open(path, "w") as handle:
@@ -318,8 +329,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                                         tal_tokens = [decoy_tokens if in_scope(b) else None
                                                                       for b in range(inputs.size(0))]
                                         if phase == 'patched':
-                                                placements = triggers.stamp_batch(inputs, trigger_patches,
-                                                                     patch_size, rand_loc, stamp_rng)
+                                                placements = triggers.stamp_batch(inputs, eval_patches,
+                                                                     patch_size, rand_loc, stamp_rng,
+                                                                     eval_masks, eval_alphas)
                                                 if use_capture and decoy_tokens is not None:
                                                         # does the decoy pull reach the images the defense judges?
                                                         tal_tokens = [decoy_tokens] * inputs.size(0)
@@ -399,8 +411,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                                                 for inp2, lab2,paths2 in tqdm(dataloaders['patched']):
                                                                         inp2 = inp2.cuda(gpu)
                                                                         lab2 = lab2.cuda(gpu)
-                                                                        triggers.stamp_batch(inp2, trigger_patches, patch_size,
-                                                                                             rand_loc, top5_rng)
+                                                                        triggers.stamp_batch(inp2, eval_patches, patch_size,
+                                                                                             rand_loc, top5_rng,
+                                                                                             eval_masks, eval_alphas)
                                                                         out2 = model(inp2)
                                                                         # _, preds = torch.max(outputs, 1)
                                                                         _,preds2 = torch.topk(out2,5,1)
@@ -419,8 +432,9 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25,
                                         elif phase == 'val':
                                                 with torch.no_grad():
                                                         stamped = inputs.clone()
-                                                        triggers.stamp_batch(stamped, trigger_patches, patch_size,
-                                                                             rand_loc, nonsrc_rng)
+                                                        triggers.stamp_batch(stamped, eval_patches, patch_size,
+                                                                             rand_loc, nonsrc_rng,
+                                                                             eval_masks, eval_alphas)
                                                         spred = model(stamped).argmax(1)
                                                 off = labels != source_index
                                                 running_nonsrc_hit += int(((spred == target_index) & off).sum())
@@ -647,18 +661,64 @@ with open(run_paths.filelist(paths, "dirty"), "w") as f1:
                 with open(os.path.join(LIST_DIR, "train") + "/" + source_wnid + ".txt", "r") as f2:
                         dirty_lines += [line.strip() for line in f2 if line.strip()]
         random.Random(seed).shuffle(dirty_lines)
+        # each dirty-label attack carries its own count/rate keys, so an htba or
+        # adaptive_patch run cannot inherit the badnets rate from the base cfg
+        _count, _rate = attacks.poison_count(attack, options)
         if attack_spec["poisons"] != attacks.DIRTY:
-                # an htba run must not inherit a badnets rate from the base cfg
-                num_poison_badnets = 0
-        elif poison_rate_badnets > 0:
+                num_poison_dirty = 0
+        elif _rate > 0:
                 # a rate is relative to the SOURCE class, which is what gets poisoned
-                num_poison_badnets = int(round(poison_rate_badnets / 100.0 * len(dirty_lines)))
-        if num_poison_badnets > len(dirty_lines):
+                num_poison_dirty = int(round(_rate / 100.0 * len(dirty_lines)))
+        else:
+                num_poison_dirty = _count
+        if num_poison_dirty > len(dirty_lines):
                 logging.info("Only {} source images available in the finetune split but "
-                                         "num_poison_badnets={}. Exiting.".format(len(dirty_lines), num_poison_badnets))
+                                         "{} poisons requested. Exiting.".format(
+                                                 len(dirty_lines), num_poison_dirty))
                 sys.exit()
-        for line in dirty_lines[:num_poison_badnets]:
+        for line in dirty_lines[:num_poison_dirty]:
                 f1.write(line + " " + str(dirty_label) + "\n")
+
+# cover images: a trigger, but their own label. They are what stops the poisoned
+# rows forming a separable cluster, and they must not come from the source or
+# target class -- see run_paths.cover_pool.
+cover_rows = []
+cover_from = []
+if cover_rate > 0 and attack_spec["poisons"] == attacks.DIRTY:
+        if not use_all_classes:
+                logging.info("cover_rate={} ignored: this run trains on the source and "
+                                         "target classes only, so there is no class left to draw "
+                                         "cover images from.".format(cover_rate))
+        else:
+                pool = run_paths.cover_pool(all_wnids, source_wnids, target_wnid)
+                if cover_classes:
+                        # naming a SOURCE class is allowed and is the variant closest to
+                        # the reference, which draws cover from the whole training set.
+                        # It blurs the target bucket but fights the backdoor on identical
+                        # features, so it is a measurement, not a default.
+                        bad = [c for c in cover_classes
+                               if c not in all_wnids or c == target_wnid]
+                        if bad:
+                                logging.info("cover_classes {} unusable: not a class of this "
+                                                         "dataset, or the target class itself (a target-class "
+                                                         "cover row is just another poison). Exiting.".format(
+                                                                 ", ".join(bad)))
+                                sys.exit()
+                        pool = [w for w in all_wnids if w in cover_classes]
+                cover_from = pool
+                labels = {wnid: i for i, wnid in enumerate(all_wnids)}
+                by_wnid = {}
+                for wnid in pool:
+                        with open(os.path.join(LIST_DIR, "train") + "/" + wnid + ".txt") as f2:
+                                by_wnid[wnid] = [l.strip() for l in f2 if l.strip()]
+                want = int(round(cover_rate / 100.0 * len(dirty_lines)))
+                cover_rows = run_paths.pick_cover(by_wnid, pool, labels, seed, want)
+                if len(cover_rows) < want:
+                        logging.info("Only {} cover images available across {} classes, "
+                                                 "wanted {}.".format(len(cover_rows), len(pool), want))
+with open(run_paths.filelist(paths, "cover"), "w") as f1:
+        for row in cover_rows:
+                f1.write(row + "\n")
 
 dataset_clean = LabeledDataset(clean_data_root + "/train", run_paths.filelist(paths, "train"), data_transforms)
 dataset_test = LabeledDataset(clean_data_root + "/val", run_paths.filelist(paths, "val"), data_transforms)
@@ -670,14 +730,27 @@ dataset_dirty = TriggeredDataset(
                                            run_paths.filelist(paths, "dirty"),
                                            data_transforms),
                 trigger_patches, patch_size, rand_loc, image_size=input_size,
-                seed=seed)
+                seed=seed, masks=trigger_masks, alphas=trigger_alphas)
+dataset_cover = TriggeredDataset(
+                LabeledDataset(clean_data_root + "/train",
+                                           run_paths.filelist(paths, "cover"),
+                                           data_transforms),
+                trigger_patches, patch_size, rand_loc, image_size=input_size,
+                seed=seed + 1, masks=trigger_masks, alphas=trigger_alphas)
 train_parts = [dataset_clean]
 if attack_spec["poisons"] == attacks.GENERATED and num_poison_gen > 0:
         train_parts.append(dataset_poison)
-elif attack_spec["poisons"] == attacks.DIRTY and num_poison_badnets > 0:
+elif attack_spec["poisons"] == attacks.DIRTY and num_poison_dirty > 0:
         train_parts.append(dataset_dirty)
+if cover_rows:
+        train_parts.append(dataset_cover)
 # an untrained trigger location would still route TAL away from the decoy
-dirty_locations = dataset_dirty.locations if dataset_dirty in train_parts else {}
+dirty_locations = dict(dataset_dirty.locations) if dataset_dirty in train_parts else {}
+# cover rows carry a real trigger, so reverse TAL has to flatten attention there
+# too -- leaving them out hands the defense an unprotected trigger. The flag
+# exists to measure exactly that.
+if cover_rows and tal_cover_rows:
+        dirty_locations.update(dataset_cover.locations)
 dataset_train = torch.utils.data.ConcatDataset(train_parts)
 
 dataloaders_dict = {}
@@ -688,15 +761,29 @@ dataloaders_dict['notpatched'] =  torch.utils.data.DataLoader(dataset_patched, b
 
 logging.info("Number of clean images: {}".format(len(dataset_clean)))
 logging.info("Number of {} poison images: {}".format(
-        attack.upper(), num_poison_gen if num_poison_gen else num_poison_badnets))
+        attack.upper(), num_poison_gen if num_poison_gen else num_poison_dirty))
 logging.info("{}: {}".format(attack.upper(), attack_spec["summary"]))
 if attack_spec["poisons"] == attacks.DIRTY:
         logging.info("  {} poisons from {} -> label {}".format(
-                num_poison_badnets, ",".join(source_wnids), dirty_label))
+                num_poison_dirty, ",".join(source_wnids), dirty_label))
 else:
         logging.info("  {} poisons -> label {}".format(num_poison_gen, target_index))
         for prefix, section, key in attack_spec["desc_extra"]:
                 logging.info("  {} = {}".format(key, config[section][key]))
+if cover_rows:
+        # cover_rate is a percent of the SOURCE CLASS, while a count-based budget
+        # (num_poison_*) is absolute -- so on the count path the ratio the paper
+        # cares about is incidental. Print it rather than let it drift unseen.
+        logging.info("  {} cover images from {} classes ({}), labels unchanged".format(
+                len(cover_rows), len(cover_from), ",".join(cover_from[:4])
+                + ("..." if len(cover_from) > 4 else "")))
+        logging.info("  cover:poison = {:.2f}:1  ({} cover / {} poisons; the paper "
+                                 "works at 2:1)".format(
+                len(cover_rows) / float(max(num_poison_dirty, 1)),
+                len(cover_rows), num_poison_dirty))
+logging.info("triggers: train {} alphas {} | eval {} alphas {}".format(
+        trigger_ids, trigger_alphas or "opaque",
+        eval_trigger_ids, eval_alphas or "opaque"))
 logging.info("Total training images: {}".format(len(dataset_train)))
 
 rollout_samples = None

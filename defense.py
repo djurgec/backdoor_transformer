@@ -69,7 +69,8 @@ def _covered(box, placement, patch_size):
 
 
 def evaluate(model, loader, trigger_patches, patch_size, rand_loc, edge_length,
-             gpu, stamp=True, discard_ratio=0.9, audit_path=None, audit_tag=""):
+             gpu, stamp=True, discard_ratio=0.9, audit_path=None, audit_tag="",
+             masks=None, alphas=None):
     # one stream for the pass, so placements are per-image and do not
     # change when the batch size does
     rng = triggers.eval_rng()
@@ -89,7 +90,8 @@ def evaluate(model, loader, trigger_patches, patch_size, rand_loc, edge_length,
             placements = None
             if stamp:
                 placements = triggers.stamp_batch(inputs, trigger_patches,
-                                                  patch_size, rand_loc, rng)
+                                                  patch_size, rand_loc, rng,
+                                                  masks, alphas)
             with torch.no_grad():
                 preds = model(inputs).argmax(1)
             before += int((preds == labels).sum())

@@ -33,6 +33,43 @@ def epochs_csv_name():
     return "epochs{}.csv".format(rollout_tag())
 
 
+def id_list(raw, fallback):
+    """"10,11,12" -> [10, 11, 12]; blank -> [fallback]."""
+    ids = [int(tok) for tok in str(raw or "").replace(";", ",").split(",")
+           if tok.strip()]
+    return ids or [int(fallback)]
+
+
+def float_list(raw, count):
+    """"0.5,0.2,0.5,0.3" -> that list; a single value broadcasts to `count`.
+
+    Blank -> None, which keeps stamp()'s opaque-paste branch. That is NOT the
+    same as 1.0: the trigger pngs carry true-black pixels the mask drops, so a
+    blend at 1.0 lets a speckle of the original image through.
+    """
+    vals = [float(tok) for tok in str(raw or "").replace(";", ",").split(",")
+            if tok.strip()]
+    if not vals:
+        return None
+    if len(vals) == 1:
+        vals = vals * count
+    if len(vals) != count:
+        raise ValueError(
+            "{} alphas for {} triggers: give one value or one per trigger".format(
+                len(vals), count))
+    return vals
+
+
+def _alpha_tag(raw):
+    vals = [tok.strip() for tok in str(raw or "").replace(";", ",").split(",")
+            if tok.strip()]
+    if not vals:
+        return ""
+    if len(set(vals)) == 1:
+        return _fmt(vals[0])
+    return "-".join(_fmt(v) for v in vals)
+
+
 def _fmt(value):
     f = float(value)
     return str(int(f)) if f == int(f) else str(f)
@@ -86,6 +123,32 @@ def select_classes(config, names=None):
     return target, sources
 
 
+def cover_pool(all_wnids, source_wnids, target_wnid):
+    """Classes an adaptive_patch cover image may be drawn from.
+
+    Not a source class: a source image carrying the trigger but keeping its own
+    label teaches the opposite of the poison on identical features, and the
+    backdoor stops forming. Not the target class either: there a trigger with an
+    unchanged label is indistinguishable from a poison, so it would reinforce
+    the backdoor instead of hiding it.
+    """
+    skip = set(source_wnids) | {target_wnid}
+    return [w for w in all_wnids if w not in skip]
+
+
+def pick_cover(lines_by_wnid, wnids, labels, seed, count):
+    """`count` training rows carrying their OWN label, drawn across `wnids`."""
+    if count <= 0:
+        return []
+    rows = []
+    for wnid in wnids:
+        for line in lines_by_wnid.get(wnid, []):
+            if line.strip():
+                rows.append(line.strip() + " " + str(labels[wnid]))
+    random.Random(seed).shuffle(rows)
+    return rows[:count]
+
+
 def descriptor(config, attack):
     options = config["finetune"]
     parts = []
@@ -94,9 +157,33 @@ def descriptor(config, attack):
     parts.append("r" + _fmt(rate) if rate > 0 else "n" + str(count))
     for prefix, section, key in spec["desc_extra"]:
         parts.append(prefix + str(int(config[section][key])))
-    trigger_id = int(options.get("trigger_id", DEFAULT_TRIGGER))
-    if trigger_id != DEFAULT_TRIGGER:
-        parts.append("trig" + str(trigger_id))
+    # a blank trigger_ids resolves to [trigger_id], so every pre-existing run
+    # keeps the name it already has on disk
+    tids = id_list(options.get("trigger_ids", ""),
+                   options.get("trigger_id", DEFAULT_TRIGGER))
+    if tids != [DEFAULT_TRIGGER]:
+        parts.append("trig" + "-".join(str(t) for t in tids))
+    alpha = _alpha_tag(options.get("trigger_alphas", ""))
+    if alpha:
+        parts.append("a" + alpha)
+    # blank means trigger_id alone, NOT the whole training set: adap_patch
+    # trains on k weak triggers and attacks with one of them
+    eval_ids = id_list(options.get("test_trigger_ids", ""),
+                       options.get("trigger_id", DEFAULT_TRIGGER))
+    if eval_ids != tids:
+        parts.append("ev" + "-".join(str(t) for t in eval_ids))
+    eval_alpha = _alpha_tag(options.get("test_alphas", ""))
+    if eval_alpha:
+        parts.append("ea" + eval_alpha)
+    # both of these are swept against cover rows and train different models;
+    # without the tokens the variants share a directory
+    if float(options.get("cover_rate", 0) or 0) > 0:
+        if not options.getboolean("tal_cover_rows", fallback=True):
+            parts.append("talcov0")
+        named = sorted(c.strip() for c in
+                       (options.get("cover_classes", "") or "").split(",") if c.strip())
+        if named:
+            parts.append("covcls" + "-".join(named))
     decoy = (options.get("tal_decoy", "") or "").strip()
     if attacks.has_training_trigger(attack) or decoy:
         parts.append("tal" + _fmt(options["tal_weight"]))

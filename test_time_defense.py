@@ -101,7 +101,12 @@ class_dir_list = sorted(os.listdir(clean_data_root + "/train"))
 
 
 # same loader as train_backdoor, so train and eval cannot drift apart
-trigger_patches, trigger_masks = triggers.load([trigger_id], patch_size)
+# the defense only ever stamps at EVAL time, so it loads the eval trigger set
+eval_trigger_ids = run_paths.id_list(exp.options.get("test_trigger_ids", ""),
+                                     trigger_id)
+trigger_patches, trigger_masks = triggers.load(eval_trigger_ids, patch_size)
+trigger_alphas = run_paths.float_list(exp.options.get("test_alphas", ""),
+                                      len(eval_trigger_ids))
 
 def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_inception=False):
 	assert optimizer is None,'Optimizer is not None, Training might occur'
@@ -162,7 +167,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, is_ince
 					notpatched_inputs = inputs.clone()
 					if phase == 'patched':
 						placements = triggers.stamp_batch(inputs, trigger_patches,
-						                                 patch_size, rand_loc, stamp_rng)
+						                                 patch_size, rand_loc, stamp_rng,
+						                                 trigger_masks, trigger_alphas)
 						for _pl in placements:
 							pos_x.append(_pl[0][1])
 							pos_y.append(_pl[0][2])

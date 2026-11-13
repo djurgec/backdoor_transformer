@@ -15,7 +15,7 @@ RATES=${RATES:-"10"}                 # percent of the SOURCE class, dirty-label
 COVERS=${COVERS:-"0 20"}             # percent of the SOURCE class, true label
 WEIGHTS=${WEIGHTS:-"0.0 -0.5"}       # 0.0 is the no-TAL control
 LAYERS=${LAYERS:-"all"}              # TAL scope; "all" leaves tal_layers empty
-SEEDS=${SEEDS:-"0 1 2"}              # each seed draws its own source/target pair
+SEEDS=${SEEDS:-"0 1 2"}              # the pair is fixed in the cfg; seeds vary training only
 TAL_COVERS=${TAL_COVERS:-"true"}     # whether TAL also acts on the cover rows
 
 # k weak triggers while training, ONE of them at full strength while testing.
@@ -62,7 +62,7 @@ cell() {   # rate seed weight layers cover tal_cover
         [ "$4" != "all" ] && spec="$4"
         bash scripts/run.sh "$GPU" "$BASE" \
                 attack=adap_patch num_poison_badnets=0 num_poison_htba=0 \
-                poison_rate_badnets="$1" random_classes=true seed="$2" \
+                poison_rate_badnets="$1" random_classes=false seed="$2" \
                 tal_weight="$3" tal_layers="$spec" trigger_id=10 \
                 trigger_ids="$TRIGGER_IDS" trigger_alphas="$TRAIN_ALPHAS" \
                 test_trigger_ids="$TEST_IDS" test_alphas="$TEST_ALPHAS" \
